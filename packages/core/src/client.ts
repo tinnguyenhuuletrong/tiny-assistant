@@ -275,14 +275,22 @@ export class AssistantClient {
 		this.#emit();
 	}
 
-	send(sessionId: number, text: string, mode: SendMode = "followUp"): void {
+	/**
+	 * Send a message. Resolves `false` when it could not be handed to the daemon (socket down and the REST fallback
+	 * failed), so a composer can keep the text; the error is also reported through `onError`.
+	 */
+	async send(sessionId: number, text: string, mode: SendMode = "followUp"): Promise<boolean> {
 		const requestId = newRequestId();
 		if (this.#socket?.readyState === WebSocket.OPEN) {
 			this.#send({ t: "send", sessionId, text, requestId, mode });
-		} else {
-			void this.#post(`/api/sessions/${sessionId}/messages`, { text, mode, requestId }).catch((error) =>
-				this.#fail(String(error), sessionId),
-			);
+			return true;
+		}
+		try {
+			await this.#post(`/api/sessions/${sessionId}/messages`, { text, mode, requestId });
+			return true;
+		} catch (error) {
+			this.#fail(error instanceof Error ? error.message : String(error), sessionId);
+			return false;
 		}
 	}
 

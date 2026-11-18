@@ -30,6 +30,8 @@ export function fixture(): Fixture {
 		fsRoots: [root],
 		token: undefined,
 		allowedLogins: [],
+		allowedHosts: [],
+		allowedOrigins: [],
 		allowAnyNetwork: false,
 	};
 	const faux = fauxProvider();

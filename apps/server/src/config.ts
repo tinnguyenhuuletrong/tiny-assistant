@@ -21,6 +21,10 @@ export type Config = {
 	token: string | undefined;
 	/** Tailscale logins allowed through `tailscale serve` (the `Tailscale-User-Login` header); empty: any tailnet user. */
 	allowedLogins: string[];
+	/** Extra `Host` names to accept (beyond IPs, localhost, single-label, `.local`, `.ts.net`). */
+	allowedHosts: string[];
+	/** Extra browser origins allowed to make changes (the Vite dev server by default). */
+	allowedOrigins: string[];
 	/** Accept connections from outside loopback and the tailnet (100.64.0.0/10, fd7a:115c:a1e0::/48). Off by default. */
 	allowAnyNetwork: boolean;
 };
@@ -51,6 +55,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		fsRoots: (list(env.TINY_FS_ROOTS).length > 0 ? list(env.TINY_FS_ROOTS) : ["~"]).map(expand),
 		token: env.TINY_TOKEN || undefined,
 		allowedLogins: list(env.TINY_ALLOWED_LOGINS),
+		allowedHosts: list(env.TINY_ALLOWED_HOSTS).map((host) => host.toLowerCase()),
+		allowedOrigins: [...list(env.TINY_ALLOWED_ORIGINS), "http://localhost:5173", "http://127.0.0.1:5173"],
 		allowAnyNetwork: env.TINY_ALLOW_ANY_NETWORK === "1",
 	};
 }

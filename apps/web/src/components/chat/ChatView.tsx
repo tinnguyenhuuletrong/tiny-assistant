@@ -118,9 +118,10 @@ export function ChatView({ sessionId }: { sessionId: number }) {
 		[ui, session?.projectId, sessionId],
 	);
 
-	const onSubmit = (text: string) => {
-		client.send(sessionId, text, busy ? mode : "followUp");
+	const onSubmit = async (text: string) => {
 		setStick((value) => value + 1);
+		// false keeps the text in the composer when the message could not be sent.
+		return client.send(sessionId, text, busy ? mode : "followUp");
 	};
 
 	const lastItem = items[items.length - 1];

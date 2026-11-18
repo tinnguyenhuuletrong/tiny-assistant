@@ -413,13 +413,13 @@ async function submit(text: string): Promise<void> {
 		openSession(session.id);
 		return;
 	}
-	client.send(ui.sessionId, trimmed, current()?.busy && steerNext ? "steer" : "followUp");
+	void client.send(ui.sessionId, trimmed, current()?.busy && steerNext ? "steer" : "followUp");
 	steerNext = false;
 }
 
 let steerNext = false;
 
-function pick(items: SelectItem[], onSelect: (item: SelectItem) => void, title?: string): void {
+function pick(items: SelectItem[], onSelect: (item: SelectItem) => void | Promise<void>, title?: string): void {
 	if (items.length === 0) {
 		notify("Nothing to pick from");
 		return;
@@ -437,7 +437,9 @@ function pick(items: SelectItem[], onSelect: (item: SelectItem) => void, title?:
 	list.onSelect = (item) => {
 		handle.hide();
 		tui.setFocus(editor);
-		onSelect(item);
+		void Promise.resolve()
+			.then(() => onSelect(item))
+			.catch((error) => notify(error instanceof Error ? error.message : String(error), "error"));
 	};
 	list.onCancel = () => {
 		handle.hide();
@@ -574,10 +576,10 @@ async function command(line: string): Promise<void> {
 			await client.reset(needSession());
 			return;
 		case "continue":
-			client.send(needSession(), arg || "Continue.", "followUp");
+			void client.send(needSession(), arg || "Continue.", "followUp");
 			return;
 		case "steer":
-			if (arg) client.send(needSession(), arg, "steer");
+			if (arg) void client.send(needSession(), arg, "steer");
 			else {
 				steerNext = true;
 				notify("Next message steers the running turn");

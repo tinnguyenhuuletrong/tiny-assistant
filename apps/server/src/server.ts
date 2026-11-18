@@ -2,13 +2,14 @@
  * The daemon's API: REST under `/api`, the live WebSocket at `/ws`, and the built web app for everything else.
  */
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import type { ClientMessage, DirListing, ServerMessage } from "@tiny/core/protocol";
 import type { Server, ServerWebSocket } from "bun";
 import { authorize } from "./auth.ts";
 import { type AssistantService, HttpError } from "./service.ts";
 
-type SocketData = { follows: Map<number, () => void>; client: string; login: string | undefined };
+type Follow = { stop: (() => void) | undefined };
+type SocketData = { follows: Map<number, Follow>; client: string; login: string | undefined };
 
 const ALL = "all";
 
@@ -179,8 +180,14 @@ export function startServer(service: AssistantService): Server<SocketData> {
 				{ headers: { "content-type": "text/plain" } },
 			);
 		}
-		const path = resolve(webDir, `.${decodeURIComponent(url.pathname)}`);
-		if (path.startsWith(webDir) && existsSync(path) && statSync(path).isFile()) {
+		let pathname: string;
+		try {
+			pathname = decodeURIComponent(url.pathname);
+		} catch {
+			return json({ error: "Bad path" }, 400);
+		}
+		const path = resolve(webDir, `.${pathname}`);
+		if (path.startsWith(`${webDir}${sep}`) && existsSync(path) && statSync(path).isFile()) {
 			const immutable = url.pathname.startsWith("/assets/");
 			return new Response(Bun.file(path), {
 				headers: { "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache" },
@@ -221,27 +228,34 @@ export function startServer(service: AssistantService): Server<SocketData> {
 				send(ws, { t: "state", state: service.state() });
 				return;
 			case "subscribe": {
-				if (ws.data.follows.has(message.sessionId)) return;
-				ws.data.follows.set(message.sessionId, () => {}); // reserve, so a duplicate subscribe is ignored
+				const id = message.sessionId;
+				if (ws.data.follows.has(id)) return;
+				// Each subscribe owns one entry. A later unsubscribe/subscribe replaces it, so a follow that resolves after
+				// being superseded stops itself instead of leaking a second listener on this socket.
+				const entry: Follow = { stop: undefined };
+				ws.data.follows.set(id, entry);
+				const current = () => ws.data.follows.get(id) === entry;
+				let follow: Awaited<ReturnType<AssistantService["follow"]>>;
 				try {
-					const follow = await service.follow(message.sessionId, (update) => {
-						if (update.t === "ops") send(ws, { t: "ops", sessionId: message.sessionId, ops: update.ops });
-						else send(ws, { t: "ended", sessionId: message.sessionId, reason: update.reason });
+					follow = await service.follow(id, (update) => {
+						if (!current()) return;
+						if (update.t === "ops") send(ws, { t: "ops", sessionId: id, ops: update.ops });
+						else send(ws, { t: "ended", sessionId: id, reason: update.reason });
 					});
-					if (!ws.data.follows.has(message.sessionId)) {
-						follow.stop(); // unsubscribed meanwhile
-						return;
-					}
-					ws.data.follows.set(message.sessionId, follow.stop);
-					send(ws, { t: "view", sessionId: message.sessionId, value: follow.value });
 				} catch (error) {
-					ws.data.follows.delete(message.sessionId);
+					if (current()) ws.data.follows.delete(id);
 					throw error;
 				}
+				if (!current()) {
+					follow.stop();
+					return;
+				}
+				entry.stop = follow.stop;
+				send(ws, { t: "view", sessionId: id, value: follow.value });
 				return;
 			}
 			case "unsubscribe":
-				ws.data.follows.get(message.sessionId)?.();
+				ws.data.follows.get(message.sessionId)?.stop?.();
 				ws.data.follows.delete(message.sessionId);
 				return;
 			case "send":
@@ -310,7 +324,7 @@ export function startServer(service: AssistantService): Server<SocketData> {
 				}
 			},
 			close(ws) {
-				for (const stop of ws.data.follows.values()) stop();
+				for (const entry of ws.data.follows.values()) entry.stop?.();
 				ws.data.follows.clear();
 			},
 		},

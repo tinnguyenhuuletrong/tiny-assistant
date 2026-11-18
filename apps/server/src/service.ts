@@ -99,7 +99,12 @@ export class AssistantService {
 	modelList: ModelInfo[] = [];
 	defaultModel: string | null = null;
 
+	/** Feeds being opened or open, by session. */
 	readonly #feeds = new Map<number, Promise<Feed>>();
+	/** The open feed of each session, so stale cleanup never removes a newer feed. */
+	readonly #openFeeds = new Map<number, Feed>();
+	/** Index runs per session, chained so two never read the same mark and insert the same rows. */
+	readonly #indexing = new Map<number, Promise<void>>();
 	readonly #busy = new Set<number>();
 	readonly #runningWorkflows = new Map<number, Set<number>>();
 	readonly #sessionsListeners = new Set<() => void>();
@@ -519,8 +524,18 @@ export class AssistantService {
 		if (pending) return pending;
 		pending = this.#openFeed(id);
 		this.#feeds.set(id, pending);
-		pending.catch(() => this.#feeds.delete(id));
+		const opening = pending;
+		opening.catch(() => {
+			if (this.#feeds.get(id) === opening) this.#feeds.delete(id);
+		});
 		return pending;
+	}
+
+	/** Drop a feed from the maps, unless a newer feed for the same session replaced it. */
+	#forget(feed: Feed): void {
+		if (this.#openFeeds.get(feed.sessionId) !== feed) return;
+		this.#openFeeds.delete(feed.sessionId);
+		this.#feeds.delete(feed.sessionId);
 	}
 
 	async #openFeed(id: number): Promise<Feed> {
@@ -536,7 +551,10 @@ export class AssistantService {
 			runStartedAt: 0,
 			runInputs: [],
 		};
+		this.#openFeeds.set(id, feed);
 		this.#observeBusy(feed);
+		// A feed opened for a send, compact, or workflow may never become busy: let it go once nobody needs it.
+		this.#maybeRelease(feed);
 		watch.start(async (call) => {
 			if (call.kind !== "value") return;
 			feed.latest = call.value;
@@ -545,7 +563,8 @@ export class AssistantService {
 			this.#observeBusy(feed);
 		});
 		void watch.closed.then((end) => {
-			this.#feeds.delete(id);
+			clearTimeout(feed.idleTimer);
+			this.#forget(feed);
 			for (const listener of feed.listeners) listener({ t: "ended", reason: end.kind });
 		});
 		return feed;
@@ -573,22 +592,54 @@ export class AssistantService {
 		clearTimeout(feed.idleTimer);
 		feed.idleTimer = setTimeout(() => {
 			if (feed.listeners.size > 0 || feed.busy) return;
-			this.#feeds.delete(feed.sessionId);
+			this.#forget(feed);
 			void feed.watch.stop();
 		}, 60_000);
 	}
 
-	/** After a restart, follow sessions whose runs pi-durable resumed, so their end is indexed and shown. */
+	/**
+	 * After a restart, follow sessions whose runs pi-durable resumed, and track resumed workflow runs, so clients show
+	 * them as busy (with a Stop button) and their end is indexed.
+	 */
 	async #reattachBusySessions(): Promise<void> {
 		for (const session of this.db.sessions(() => false, { limit: 200 })) {
 			const live = await this.harness.snapshot(LiveDoc, session.id as never, context).catch(() => undefined);
 			if (live?.run) await this.#feed(session.id).catch(() => undefined);
 		}
+		const runs = await this.harness
+			.commit(async (tx) => {
+				const found: { sessionId: number; runId: number }[] = [];
+				let cursor: Parameters<typeof tx.scanTasks>[2];
+				do {
+					const page = await tx.scanTasks({ kind: this.#workflowTask.definition.name }, 200, cursor);
+					for (const task of page.items) {
+						if (task.state.status !== "terminal")
+							found.push({ sessionId: Number(task.conversationId), runId: Number(task.id) });
+					}
+					cursor = page.next;
+				} while (cursor !== undefined);
+				return found;
+			}, context)
+			.catch((error) => {
+				console.warn(`[workflows] could not list resumed runs: ${error}`);
+				return [];
+			});
+		for (const run of runs) this.#trackWorkflow(run.sessionId, run.runId);
 	}
 
 	// ---- indexing and run metrics ----
 
-	async #indexSession(id: number, feed: Feed | undefined): Promise<void> {
+	#indexSession(id: number, feed: Feed | undefined): Promise<void> {
+		const previous = this.#indexing.get(id) ?? Promise.resolve();
+		const next = previous.then(() => this.#indexSessionNow(id, feed));
+		this.#indexing.set(id, next);
+		void next.finally(() => {
+			if (this.#indexing.get(id) === next) this.#indexing.delete(id);
+		});
+		return next;
+	}
+
+	async #indexSessionNow(id: number, feed: Feed | undefined): Promise<void> {
 		if (this.#closing) return;
 		try {
 			const conversation = await this.harness.conversation(id as never, context);

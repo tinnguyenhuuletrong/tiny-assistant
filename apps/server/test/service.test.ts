@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as BACKGROUND } from "@earendil-works/chord/context";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
@@ -77,7 +77,9 @@ export default {
 		await ctx.step("one", () => { appendFileSync(${JSON.stringify(log)}, "one\\n"); return 1; });
 		await ctx.step("two", async () => {
 			appendFileSync(${JSON.stringify(log)}, "two\\n");
-			if (!existsSync(${JSON.stringify(marker)})) {
+			if (existsSync(${JSON.stringify(marker)})) {
+				await new Promise((resolve) => setTimeout(resolve, 400)); // long enough to observe the resumed run
+			} else {
 				writeFileSync(${JSON.stringify(marker)}, "x");
 				await new Promise((resolve, reject) => {
 					const timer = setTimeout(resolve, 60_000);
@@ -100,6 +102,7 @@ export default {
 
 		await service.close(); // the "crash": step two is interrupted
 		service = await fx.open(); // resumes the pending task
+		expect(service.session(sessionId)?.workflowRunning).toBe(true); // re-tracked, so clients can stop it
 
 		const finished = await until("the workflow to finish", async () => {
 			const { items } = await service!.entries(sessionId, undefined, 100);
@@ -123,6 +126,29 @@ export default {
 		service = await fx.open();
 		await expect(service.runWorkflow({ name: "typed", input: {} })).rejects.toThrow(/Invalid input/);
 		expect(service.sessions()).toHaveLength(0);
+	});
+});
+
+describe("http", () => {
+	test("static files stay inside the web root and bad escapes are rejected", async () => {
+		fx = fixture();
+		const web = join(fx.root, "web");
+		mkdirSync(join(fx.root, "web-old"), { recursive: true });
+		mkdirSync(web, { recursive: true });
+		writeFileSync(join(web, "index.html"), "<p>app</p>");
+		writeFileSync(join(fx.root, "web-old", "secret.txt"), "secret");
+		fx.config.webDir = web;
+		service = await fx.open();
+		const server = startServer(service);
+		try {
+			const base = `http://127.0.0.1:${server.port}`;
+			expect((await fetch(`${base}/%E0`)).status).toBe(400);
+			const sibling = await (await fetch(`${base}/..%2fweb-old/secret.txt`)).text();
+			expect(sibling).not.toContain("secret");
+			expect(await (await fetch(`${base}/anything`)).text()).toContain("app"); // SPA fallback
+		} finally {
+			server.stop(true);
+		}
 	});
 });
 
