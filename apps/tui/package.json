@@ -1,0 +1,18 @@
+{
+	"name": "@tiny/tui",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"bin": {
+		"tiny": "src/main.ts"
+	},
+	"scripts": {
+		"start": "bun src/main.ts",
+		"bundle": "bun build src/main.ts --target bun --outfile ../../dist/tiny-tui.js",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@tiny/core": "workspace:*",
+		"@earendil-works/pi-tui": "1.5.2"
+	}
+}

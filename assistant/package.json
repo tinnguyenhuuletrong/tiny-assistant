@@ -1,0 +1,10 @@
+{
+	"name": "@tiny/assistant",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Your code-driven tools and workflows. Edit freely: the daemon hot-reloads this folder.",
+	"dependencies": {
+		"@tiny/core": "workspace:*"
+	}
+}

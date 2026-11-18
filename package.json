@@ -1,0 +1,34 @@
+{
+	"name": "tiny-assistant",
+	"private": true,
+	"type": "module",
+	"workspaces": [
+		"packages/*",
+		"apps/*",
+		"assistant"
+	],
+	"scripts": {
+		"dev": "bun run --filter '@tiny/server' --filter '@tiny/web' dev",
+		"start": "bun apps/server/src/main.ts",
+		"tui": "bun apps/tui/src/main.ts",
+		"web:dev": "bun run --filter '@tiny/web' dev",
+		"web:build": "bun run --filter '@tiny/web' build",
+		"tui:bundle": "bun build apps/tui/src/main.ts --target bun --minify --outfile dist/tiny-tui.js",
+		"typecheck": "bun run --filter '*' typecheck",
+		"lint": "biome check .",
+		"test": "bun test"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.6.8",
+		"@types/bun": "^1.4.4",
+		"typescript": "^7.0.2"
+	},
+	"dependencies": {
+		"@tiny/core": "workspace:*"
+	},
+	"description": "A tiny, self-hosted personal AI assistant on pi-durable: one daemon, a web app, and a terminal client, all in sync.",
+	"license": "MIT",
+	"engines": {
+		"bun": ">=1.3"
+	}
+}

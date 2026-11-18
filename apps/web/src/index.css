@@ -1,0 +1,379 @@
+@import "tailwindcss";
+
+/* Semantic palette. Light mode is a warm off-white, dark mode a warm charcoal. */
+:root {
+	--bg: #faf9f5;
+	--sidebar: #f5f4ed;
+	--surface: #ffffff;
+	--surface-2: #f0eee6;
+	--user: #f0eee6;
+	--border: #e3e1d7;
+	--border-strong: #cfccc0;
+	--fg: #1f1e1d;
+	--muted: #66645e;
+	--faint: #9a988f;
+	--accent: #c96442;
+	--accent-fg: #ffffff;
+	--danger: #c0392b;
+	--success: #2f8a4c;
+	--warn: #b7791f;
+	--code-bg: #f3f1ea;
+	--overlay: rgb(20 20 19 / 0.4);
+	color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #262624;
+		--sidebar: #1f1e1d;
+		--surface: #30302e;
+		--surface-2: #3a3936;
+		--user: #141413;
+		--border: #3e3d39;
+		--border-strong: #55534d;
+		--fg: #f5f4ef;
+		--muted: #b2afa6;
+		--faint: #7f7c74;
+		--accent: #d97757;
+		--accent-fg: #ffffff;
+		--danger: #e5675a;
+		--success: #5cb67a;
+		--warn: #e0a64a;
+		--code-bg: #1d1d1b;
+		--overlay: rgb(0 0 0 / 0.55);
+		color-scheme: dark;
+	}
+}
+
+@theme inline {
+	--color-bg: var(--bg);
+	--color-sidebar: var(--sidebar);
+	--color-surface: var(--surface);
+	--color-surface-2: var(--surface-2);
+	--color-user: var(--user);
+	--color-border: var(--border);
+	--color-border-strong: var(--border-strong);
+	--color-fg: var(--fg);
+	--color-muted: var(--muted);
+	--color-faint: var(--faint);
+	--color-accent: var(--accent);
+	--color-accent-fg: var(--accent-fg);
+	--color-danger: var(--danger);
+	--color-success: var(--success);
+	--color-warn: var(--warn);
+	--color-code: var(--code-bg);
+	--color-overlay: var(--overlay);
+	--font-sans:
+		ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif,
+		"Apple Color Emoji", "Segoe UI Emoji";
+	--font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@custom-variant hover-none (@media (hover: none));
+
+@layer base {
+	html,
+	body,
+	#root {
+		height: 100%;
+	}
+	body {
+		background: var(--bg);
+		color: var(--fg);
+		font-family: var(--font-sans);
+		-webkit-font-smoothing: antialiased;
+		-webkit-tap-highlight-color: transparent;
+		overscroll-behavior: none;
+		text-size-adjust: 100%;
+	}
+	button {
+		cursor: pointer;
+	}
+	button:disabled {
+		cursor: default;
+	}
+	::selection {
+		background: color-mix(in srgb, var(--accent) 25%, transparent);
+	}
+}
+
+@layer components {
+	.pt-safe {
+		padding-top: env(safe-area-inset-top);
+	}
+	.pb-safe {
+		padding-bottom: env(safe-area-inset-bottom);
+	}
+	.scrollbar-thin {
+		scrollbar-width: thin;
+		scrollbar-color: var(--border-strong) transparent;
+	}
+
+	.code-block {
+		border: 1px solid var(--border);
+		border-radius: 0.75rem;
+		background: var(--code-bg);
+		overflow: hidden;
+	}
+	.code-block pre {
+		font-family: var(--font-mono);
+		font-size: 0.8125rem;
+		line-height: 1.6;
+		padding: 0.85rem 1rem;
+		overflow-x: auto;
+	}
+	.code-block code {
+		font-family: inherit;
+	}
+
+	/* ---- markdown ---- */
+	.markdown {
+		line-height: 1.7;
+		overflow-wrap: anywhere;
+	}
+	.markdown > :first-child {
+		margin-top: 0;
+	}
+	.markdown > :last-child {
+		margin-bottom: 0;
+	}
+	.markdown p,
+	.markdown ul,
+	.markdown ol,
+	.markdown blockquote,
+	.markdown .table-wrap,
+	.markdown .code-block,
+	.markdown .katex-display {
+		margin: 0.85em 0;
+	}
+	.markdown h1,
+	.markdown h2,
+	.markdown h3,
+	.markdown h4 {
+		font-weight: 600;
+		line-height: 1.3;
+		margin: 1.4em 0 0.6em;
+	}
+	.markdown h1 {
+		font-size: 1.45em;
+	}
+	.markdown h2 {
+		font-size: 1.25em;
+	}
+	.markdown h3 {
+		font-size: 1.1em;
+	}
+	.markdown ul {
+		list-style: disc;
+		padding-left: 1.5em;
+	}
+	.markdown ol {
+		list-style: decimal;
+		padding-left: 1.5em;
+	}
+	.markdown li {
+		margin: 0.25em 0;
+	}
+	.markdown li > p {
+		margin: 0.25em 0;
+	}
+	.markdown li.task-list-item {
+		list-style: none;
+	}
+	.markdown ul.contains-task-list {
+		padding-left: 0.25em;
+	}
+	.markdown li::marker {
+		color: var(--faint);
+	}
+	.markdown a {
+		color: var(--accent);
+		text-decoration: underline;
+		text-underline-offset: 2px;
+		text-decoration-thickness: 1px;
+	}
+	.markdown blockquote {
+		border-left: 3px solid var(--border-strong);
+		padding-left: 1em;
+		color: var(--muted);
+	}
+	.markdown hr {
+		border-color: var(--border);
+		margin: 1.5em 0;
+	}
+	.markdown strong {
+		font-weight: 600;
+	}
+	.markdown :not(pre) > code {
+		font-family: var(--font-mono);
+		font-size: 0.875em;
+		background: var(--code-bg);
+		border: 1px solid var(--border);
+		border-radius: 0.375rem;
+		padding: 0.1em 0.35em;
+	}
+	.markdown .table-wrap {
+		overflow-x: auto;
+	}
+	.markdown table {
+		border-collapse: collapse;
+		font-size: 0.925em;
+		min-width: 50%;
+	}
+	.markdown th,
+	.markdown td {
+		border: 1px solid var(--border);
+		padding: 0.4em 0.75em;
+		text-align: left;
+		vertical-align: top;
+	}
+	.markdown th {
+		background: var(--surface-2);
+		font-weight: 600;
+	}
+	.markdown input[type="checkbox"] {
+		margin-right: 0.4em;
+		vertical-align: middle;
+	}
+	.markdown .katex-display {
+		overflow-x: auto;
+		overflow-y: hidden;
+		padding: 0.25em 0;
+	}
+	.markdown img {
+		max-width: 100%;
+		border-radius: 0.5rem;
+	}
+
+	/* Streaming caret after the last block of the answer being written. */
+	.markdown.streaming > :last-child::after {
+		content: "";
+		display: inline-block;
+		width: 0.5em;
+		height: 1.05em;
+		margin-left: 0.15em;
+		vertical-align: text-bottom;
+		border-radius: 1px;
+		background: var(--accent);
+		animation: caret 1s steps(2, start) infinite;
+	}
+	.markdown.streaming > .code-block:last-child::after,
+	.markdown.streaming > .table-wrap:last-child::after {
+		display: none;
+	}
+
+	.shimmer {
+		background: linear-gradient(90deg, var(--faint) 0%, var(--fg) 50%, var(--faint) 100%);
+		background-size: 200% 100%;
+		-webkit-background-clip: text;
+		background-clip: text;
+		color: transparent;
+		animation: shimmer 1.8s linear infinite;
+	}
+}
+
+@keyframes caret {
+	to {
+		visibility: hidden;
+	}
+}
+
+@keyframes shimmer {
+	from {
+		background-position: 100% 0;
+	}
+	to {
+		background-position: -100% 0;
+	}
+}
+
+/* ---- syntax highlighting (highlight.js classes) ---- */
+:root {
+	--hl-keyword: #a626a4;
+	--hl-string: #50a14f;
+	--hl-number: #986801;
+	--hl-comment: #a0a1a7;
+	--hl-title: #4078f2;
+	--hl-type: #c18401;
+	--hl-attr: #986801;
+	--hl-builtin: #0184bc;
+	--hl-meta: #4078f2;
+	--hl-deletion: #e45649;
+	--hl-addition: #50a14f;
+}
+@media (prefers-color-scheme: dark) {
+	:root {
+		--hl-keyword: #c678dd;
+		--hl-string: #98c379;
+		--hl-number: #d19a66;
+		--hl-comment: #7f848e;
+		--hl-title: #61afef;
+		--hl-type: #e5c07b;
+		--hl-attr: #d19a66;
+		--hl-builtin: #56b6c2;
+		--hl-meta: #61afef;
+		--hl-deletion: #e06c75;
+		--hl-addition: #98c379;
+	}
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-section {
+	color: var(--hl-keyword);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-symbol,
+.hljs-template-tag {
+	color: var(--hl-string);
+}
+.hljs-number,
+.hljs-variable.constant_ {
+	color: var(--hl-number);
+}
+.hljs-comment,
+.hljs-quote {
+	color: var(--hl-comment);
+	font-style: italic;
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-name {
+	color: var(--hl-title);
+}
+.hljs-type,
+.hljs-title.class_,
+.hljs-class .hljs-title {
+	color: var(--hl-type);
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-property,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id {
+	color: var(--hl-attr);
+}
+.hljs-built_in,
+.hljs-variable.language_,
+.hljs-params {
+	color: var(--hl-builtin);
+}
+.hljs-meta,
+.hljs-link {
+	color: var(--hl-meta);
+}
+.hljs-deletion {
+	color: var(--hl-deletion);
+}
+.hljs-addition {
+	color: var(--hl-addition);
+}
+.hljs-emphasis {
+	font-style: italic;
+}
+.hljs-strong {
+	font-weight: 600;
+}
