@@ -47,6 +47,9 @@ describe("safe-change", () => {
 	function repo(): string {
 		const dir = join(fx.root, "project");
 		git(dir, "init", "-q", "-b", "main");
+		// The workflow commits; don't depend on the machine having a git identity (CI runners have none).
+		git(dir, "config", "user.name", "tiny test");
+		git(dir, "config", "user.email", "test@example.com");
 		writeFileSync(join(dir, "notes.md"), "# notes\n");
 		git(dir, "add", "-A");
 		git(dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init");
