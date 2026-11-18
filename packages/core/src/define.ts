@@ -23,8 +23,13 @@ export { arr, bool, int, lit, num, obj, oneOf, opt, str, union, unknown } from "
 
 export type ExecResult = { exitCode: number; output: string };
 
+/** How to revert a finished step. It gets the step's stored result, so it works after a restart too. */
+export type StepOptions<T> = { undo?: (result: T) => Promise<void> | void };
+
 export type WorkflowContext<I> = {
 	readonly input: I;
+	/** This run's id: stable across restarts, handy as an idempotency key for external calls. */
+	readonly runId: number;
 	/** The session the workflow runs in; its transcript shows the steps, logs, and agent turns. */
 	readonly sessionId: number;
 	/** The session's working directory (its project folder), when it has one. */
@@ -34,15 +39,31 @@ export type WorkflowContext<I> = {
 	/**
 	 * Run `fn` once. Its JSON result is checkpointed under `name`; after a restart the stored value is returned instead
 	 * of running `fn` again. Names must be unique within one run.
+	 *
+	 * With `undo`, the step can be reverted: if the run later fails or is stopped, the undos of the finished steps run
+	 * newest first (a saga). Each undo is checkpointed too, so a crash during the rollback never undoes a step twice.
+	 * To find the finished steps, the rollback replays `run()` with their stored results, so `run()` must take the
+	 * same path for the same results (no branching on time or randomness outside steps).
 	 */
-	step<T extends JsonValue>(name: string, fn: () => Promise<T> | T): Promise<T>;
+	step<T extends JsonValue>(name: string, fn: () => Promise<T> | T, options?: StepOptions<T>): Promise<T>;
 	/**
 	 * Ask the agent, in this session, and return its final answer text. The turn is a normal durable run: it streams in
 	 * every client and may use tools. Checkpointed like a step (named by `options.step`, default `agent:<n>`).
 	 */
 	agent(prompt: string, options?: { step?: string }): Promise<string>;
 	/** Run a shell command in the session's directory. Checkpointed like a step (default name `exec:<n>`). */
-	exec(command: string, options?: { step?: string; cwd?: string; timeoutMs?: number }): Promise<ExecResult>;
+	exec(
+		command: string,
+		options?: {
+			step?: string;
+			cwd?: string;
+			timeoutMs?: number;
+			/** Fail the step (and the run) when the command exits non-zero. */
+			check?: boolean;
+			/** Shell command that reverts this one, run if the workflow later fails or is stopped. */
+			undo?: string;
+		},
+	): Promise<ExecResult>;
 	/** Append a log line to the session transcript. */
 	log(text: string, level?: "info" | "warn" | "error"): Promise<void>;
 };

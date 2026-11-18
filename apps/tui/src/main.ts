@@ -34,6 +34,8 @@ import {
 	type ThinkingLevel,
 	type ToolState,
 	toolSummary,
+	type WorkflowRun,
+	type WorkflowStepStatus,
 } from "@tiny/core";
 import { c, editorTheme, markdownTheme, selectListTheme } from "./theme.ts";
 
@@ -160,6 +162,49 @@ function toolText(tool: ToolState, expanded: boolean): string {
 	return `${head}\n${body}${more ? `\n${more}` : ""}`;
 }
 
+function workflowRunText(run: WorkflowRun, expanded: boolean): string {
+	const spin = SPINNER[ui.spinner % SPINNER.length]!;
+	const phase: Record<WorkflowRun["phase"], string> = {
+		running: c.accent(`${spin} running`),
+		rolling_back: c.yellow(`${spin} rolling back`),
+		completed: c.green("✓ completed"),
+		failed: c.red("✗ failed"),
+		aborted: c.yellow("■ stopped"),
+	};
+	const lines = [`${c.accent("⚙")} ${c.bold(run.name)} ${c.dim(`run ${run.runId}`)}  ${phase[run.phase]}`];
+	const icon = (status: WorkflowStepStatus): string =>
+		({
+			running: c.accent(spin),
+			done: c.green("✓"),
+			failed: c.red("✗"),
+			undoing: c.yellow(spin),
+			undone: c.yellow("↺"),
+			undo_failed: c.red("✗"),
+		})[status];
+	run.steps.forEach((step, index) => {
+		const last = index === run.steps.length - 1;
+		const struck = step.status === "undone" ? c.strike(c.dim(step.name)) : step.name;
+		const note = step.summary
+			? c.dim(` ${step.summary}`)
+			: step.status === "undone" || step.status === "undoing"
+				? c.dim(` ${step.status}`)
+				: "";
+		lines.push(`  ${c.dim(last ? "└─" : "├─")} ${icon(step.status)} ${struck}${note}`);
+	});
+	if (run.rollbackReason)
+		lines.push(`  ${c.yellow("↩ undo")} ${c.dim(`finished steps, newest first (${run.rollbackReason})`)}`);
+	const logs = expanded ? run.logs : run.logs.slice(-3);
+	for (const log of logs) {
+		const text = log.text.split("\n")[0]!.slice(0, 200);
+		lines.push(
+			`  ${c.dim("│")} ${log.level === "error" ? c.red(text) : log.level === "warn" ? c.yellow(text) : c.dim(text)}`,
+		);
+	}
+	if (run.error) lines.push(`  ${c.red(run.error)}`);
+	if (run.phase === "completed" && typeof run.result === "string") lines.push(`  ${run.result.split("\n")[0]}`);
+	return lines.join("\n");
+}
+
 /** One display item as pi-tui components, cached by key and rebuilt only when its content changes. */
 class ItemView {
 	signature = "";
@@ -168,10 +213,11 @@ class ItemView {
 
 	update(item: DisplayItem, expanded: boolean): void {
 		const running =
-			item.type === "assistant" &&
-			item.parts.some(
-				(part) => part.type === "tool" && (part.tool.status === "running" || part.tool.status === "pending"),
-			);
+			(item.type === "assistant" &&
+				item.parts.some(
+					(part) => part.type === "tool" && (part.tool.status === "running" || part.tool.status === "pending"),
+				)) ||
+			(item.type === "workflow-run" && (item.run.phase === "running" || item.run.phase === "rolling_back"));
 		const signature = `${expanded}:${running ? ui.spinner : ""}:${JSON.stringify(item)}`;
 		if (signature === this.signature) return;
 		this.signature = signature;
@@ -232,6 +278,9 @@ class ItemView {
 				this.container.addChild(new Text(text, 1, 0));
 				break;
 			}
+			case "workflow-run":
+				this.container.addChild(new Text(workflowRunText(item.run, expanded), 1, 1));
+				break;
 			case "notice":
 				this.container.addChild(
 					new Text(item.level === "error" ? c.red(`✗ ${item.text}`) : c.yellow(`■ ${item.text}`), 1, 1),

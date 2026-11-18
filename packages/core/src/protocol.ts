@@ -155,16 +155,31 @@ export const ENTRY_KINDS = {
 	workflowStarted: "tiny.workflow.started",
 	workflowStep: "tiny.workflow.step",
 	workflowLog: "tiny.workflow.log",
+	workflowRollback: "tiny.workflow.rollback",
 	workflowFinished: "tiny.workflow.finished",
 } as const;
 
 export type WorkflowStartedData = { runId: number; name: string; input: JsonLike };
-export type WorkflowStepData = { runId: number; step: string; status: "done" | "failed"; summary?: string };
+export type WorkflowStepData = {
+	runId: number;
+	step: string;
+	/**
+	 * `running` when a step starts, then `done` or `failed`. During a rollback: `undoing`, then `undone` or
+	 * `undo_failed`.
+	 */
+	status: "running" | "done" | "failed" | "undoing" | "undone" | "undo_failed";
+	summary?: string;
+};
 export type WorkflowLogData = { runId: number; text: string; level: "info" | "warn" | "error" };
+/** Written when a failed or stopped run starts reverting its finished steps. */
+export type WorkflowRollbackData = { runId: number; reason: string };
+
 export type WorkflowFinishedData = {
 	runId: number;
 	name: string;
 	status: "completed" | "failed" | "aborted";
 	result?: JsonLike;
 	error?: string;
+	/** Steps whose undo ran after a failure or a stop, newest first. */
+	rolledBack?: string[];
 };

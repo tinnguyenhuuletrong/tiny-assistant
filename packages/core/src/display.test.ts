@@ -95,4 +95,47 @@ describe("buildDisplay", () => {
 		});
 		expect(items.at(-1)).toMatchObject({ type: "notice", level: "error", text: "Model error: 429" });
 	});
+
+	test("folds a workflow run's entries into one live run item", () => {
+		const wf = (id: number, kind: string, data: unknown): ViewEntry => ({ id, conversationId: 1, kind, data });
+		const entries: ViewEntry[] = [
+			wf(1, "tiny.workflow.started", { runId: 7, name: "checkout", input: { amount: 90 } }),
+			wf(2, "tiny.workflow.step", { runId: 7, step: "charge visa", status: "running" }),
+			wf(3, "tiny.workflow.step", { runId: 7, step: "charge visa", status: "done" }),
+			wf(4, "tiny.workflow.log", { runId: 7, text: "Charged 45 to visa", level: "info" }),
+			wf(5, "tiny.workflow.step", { runId: 7, step: "charge amex", status: "running" }),
+			wf(6, "tiny.workflow.step", { runId: 7, step: "charge amex", status: "failed", summary: "declined" }),
+			wf(7, "tiny.workflow.rollback", { runId: 7, reason: "declined" }),
+			wf(8, "tiny.workflow.step", { runId: 7, step: "charge visa", status: "undoing" }),
+		];
+		const live = buildDisplay(entries, {});
+		expect(live).toHaveLength(1);
+		const card = live[0];
+		if (card?.type !== "workflow-run") throw new Error("expected a run card");
+		expect(card.run.phase).toBe("rolling_back");
+		expect(card.run.steps).toEqual([
+			{ name: "charge visa", status: "undoing", summary: undefined },
+			{ name: "charge amex", status: "failed", summary: "declined" },
+		]);
+		expect(card.run.logs).toHaveLength(1);
+
+		const done = buildDisplay(
+			[
+				...entries,
+				wf(9, "tiny.workflow.step", { runId: 7, step: "charge visa", status: "undone" }),
+				wf(10, "tiny.workflow.finished", {
+					runId: 7,
+					name: "checkout",
+					status: "failed",
+					error: "declined",
+					rolledBack: ["charge visa"],
+				}),
+			],
+			{},
+		);
+		// The card shows the outcome; no extra "finished" line right after it.
+		expect(done).toHaveLength(1);
+		if (done[0]?.type !== "workflow-run") throw new Error("expected a run card");
+		expect(done[0].run).toMatchObject({ phase: "failed", error: "declined", rolledBack: ["charge visa"] });
+	});
 });

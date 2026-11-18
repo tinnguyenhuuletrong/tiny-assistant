@@ -18,6 +18,7 @@ import { TypingDots } from "../ui/Spinner.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { Thinking } from "./Thinking.tsx";
 import { ToolCard } from "./ToolCard.tsx";
+import { WorkflowRunCard } from "./WorkflowRunCard.tsx";
 
 type Props = {
 	item: DisplayItem;
@@ -333,6 +334,8 @@ function ItemView({ item, sessionId, models, isLast, endOfTurn }: Props) {
 			return <Divider icon={<RotateCcw className="size-3" />} label="Context reset" detail={item.handoff} />;
 		case "workflow":
 			return <WorkflowRow event={item.event} />;
+		case "workflow-run":
+			return <WorkflowRunCard run={item.run} />;
 		case "notice":
 			return <Notice item={item} sessionId={sessionId} />;
 	}
@@ -398,6 +401,9 @@ function sameItem(prev: Props, next: Props): boolean {
 			const y = b as typeof a;
 			return a.text === y.text && a.level === y.level;
 		}
+		case "workflow-run":
+			// A run's card changes as its later entries arrive.
+			return JSON.stringify(a.run) === JSON.stringify((b as typeof a).run);
 		default:
 			// Compaction, reset, and workflow items come from committed entries, which never change.
 			return a.entryId === (b as typeof a).entryId;

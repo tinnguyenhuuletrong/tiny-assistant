@@ -8,6 +8,7 @@ import {
 	type ViewEntry,
 	type WorkflowFinishedData,
 	type WorkflowLogData,
+	type WorkflowRollbackData,
 	type WorkflowStartedData,
 	type WorkflowStepData,
 } from "./protocol.ts";
@@ -35,6 +36,25 @@ export type UsageInfo = {
 	cost: number;
 };
 
+export type WorkflowStepStatus = WorkflowStepData["status"];
+
+/** One workflow run, folded from its entries: what a diagram of the run needs. */
+export type WorkflowRun = {
+	runId: number;
+	name: string;
+	input: unknown;
+	/** `rolling_back` from the rollback entry until the run finishes. */
+	phase: "running" | "rolling_back" | "completed" | "failed" | "aborted";
+	/** Steps in the order they started, each with its latest status. */
+	steps: { name: string; status: WorkflowStepStatus; summary?: string }[];
+	logs: { text: string; level: "info" | "warn" | "error" }[];
+	rollbackReason: string | null;
+	result?: unknown;
+	error?: string;
+	/** Steps undone by the rollback, newest first. */
+	rolledBack: string[];
+};
+
 export type DisplayItem =
 	| { type: "user"; key: string; entryId: number; text: string; images: { mimeType: string; data: string }[] }
 	| {
@@ -51,6 +71,8 @@ export type DisplayItem =
 	| { type: "compaction"; key: string; entryId: number; summary: string }
 	| { type: "reset"; key: string; entryId: number; handoff: string | null }
 	| { type: "workflow"; key: string; entryId: number; event: WorkflowEvent }
+	/** A whole run, shown where it started and updated as its entries arrive. */
+	| { type: "workflow-run"; key: string; entryId: number; run: WorkflowRun }
 	| { type: "notice"; key: string; level: "info" | "warn" | "error"; text: string };
 
 export type WorkflowEvent =
@@ -139,6 +161,7 @@ const HIDDEN = new Set(["pi.system"]);
 export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationViewValue["docs"]): DisplayItem[] {
 	const items: DisplayItem[] = [];
 	const tools = new Map<string, ToolState>();
+	const runs = new Map<number, WorkflowRun>();
 
 	// Tool results first, so calls render with their results attached wherever they are.
 	for (const entry of entries) {
@@ -185,38 +208,63 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 				items.push({ type: "reset", key, entryId: entry.id, handoff: message ? textOf(message.content) : null });
 				break;
 			}
-			case ENTRY_KINDS.workflowStarted:
-				items.push({
-					type: "workflow",
-					key,
-					entryId: entry.id,
-					event: { kind: "started", ...(entry.data as WorkflowStartedData) },
-				});
+			case ENTRY_KINDS.workflowStarted: {
+				const data = entry.data as WorkflowStartedData;
+				const run: WorkflowRun = {
+					runId: data.runId,
+					name: data.name,
+					input: data.input,
+					phase: "running",
+					steps: [],
+					logs: [],
+					rollbackReason: null,
+					rolledBack: [],
+				};
+				runs.set(data.runId, run);
+				items.push({ type: "workflow-run", key, entryId: entry.id, run });
 				break;
-			case ENTRY_KINDS.workflowStep:
-				items.push({
-					type: "workflow",
-					key,
-					entryId: entry.id,
-					event: { kind: "step", ...(entry.data as WorkflowStepData) },
-				});
+			}
+			case ENTRY_KINDS.workflowStep: {
+				const data = entry.data as WorkflowStepData;
+				const run = runs.get(data.runId);
+				if (!run) break;
+				const step = run.steps.find((candidate) => candidate.name === data.step);
+				if (step) {
+					step.status = data.status;
+					step.summary = data.summary;
+				} else run.steps.push({ name: data.step, status: data.status, summary: data.summary });
 				break;
-			case ENTRY_KINDS.workflowLog:
-				items.push({
-					type: "workflow",
-					key,
-					entryId: entry.id,
-					event: { kind: "log", ...(entry.data as WorkflowLogData) },
-				});
+			}
+			case ENTRY_KINDS.workflowLog: {
+				const data = entry.data as WorkflowLogData;
+				runs.get(data.runId)?.logs.push({ text: data.text, level: data.level });
 				break;
-			case ENTRY_KINDS.workflowFinished:
-				items.push({
-					type: "workflow",
-					key,
-					entryId: entry.id,
-					event: { kind: "finished", ...(entry.data as WorkflowFinishedData) },
-				});
+			}
+			case ENTRY_KINDS.workflowRollback: {
+				const data = entry.data as WorkflowRollbackData;
+				const run = runs.get(data.runId);
+				if (run) {
+					run.phase = "rolling_back";
+					run.rollbackReason = data.reason;
+				}
 				break;
+			}
+			case ENTRY_KINDS.workflowFinished: {
+				const data = entry.data as WorkflowFinishedData;
+				const run = runs.get(data.runId);
+				if (run) {
+					run.phase = data.status;
+					run.result = data.result;
+					run.error = data.error;
+					run.rolledBack = data.rolledBack ?? [];
+				}
+				// Repeat the outcome at the end only when other messages (agent turns) came in between.
+				const previous = items[items.length - 1];
+				if (!(previous?.type === "workflow-run" && previous.run.runId === data.runId)) {
+					items.push({ type: "workflow", key, entryId: entry.id, event: { kind: "finished", ...data } });
+				}
+				break;
+			}
 			default: {
 				// pi.user, and inputs submitted with a custom entry kind: anything carrying a user message.
 				if (message?.role === "user") {

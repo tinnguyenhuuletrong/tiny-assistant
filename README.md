@@ -125,10 +125,40 @@ export default defineWorkflow({
 ```
 
 Run it from the web app ("Run workflow"), the TUI (`/run repo-review {"focus":"security"}`), or the API
-(`POST /api/workflows/run`). Stopping the session stops the run. Each step shows up in the session as it finishes.
+(`POST /api/workflows/run`). Stopping the session stops the run.
 
-`WorkflowContext`: `input`, `sessionId`, `cwd`, `signal`, `step(name, fn)`, `agent(prompt)`, `exec(command)`,
-`log(text)`.
+### Rollback (sagas)
+
+Give a step an `undo` and the run can revert itself. If a later step fails, or you press Stop, the finished steps are
+undone newest first. The pattern comes from the checkout example in
+[the pi-durable post](https://earendil.com/posts/pi-durable/), where a declined card refunds the cards already charged:
+
+```ts
+// assistant/workflows/checkout.ts (abridged)
+for (const card of ctx.input.cards) {
+	await ctx.step(`charge ${card}`, () => bank.charge(`run-${ctx.runId}-${card}`, card, share), {
+		undo: (charge) => bank.refund(charge.id), // gets the step's stored result
+	});
+}
+await ctx.step("place order", () => placeOrder());
+```
+
+- The move into the rollback is checkpointed, and so is each undo: a crash mid-rollback resumes it, and no step is
+  undone twice.
+- To find what to undo, the rollback replays `run()` with the stored step results, so keep `run()` deterministic
+  (branch on step results, not on the clock).
+- `ctx.exec(command, { undo: "shell command" })` is the same for shell steps; `check: true` fails the step when the
+  command exits non-zero.
+  [`safe-change`](assistant/workflows/safe-change.ts) uses it: the agent changes your project on a throwaway git
+  branch, and if your tests fail the branch is deleted and you are back where you started.
+
+Every run is drawn live in the session: steps as they start and finish, and the rollback lane when a run reverts.
+([MP4](docs/media/workflow-demo.mp4))
+
+![A checkout workflow: three charges succeed, the fourth card is declined, and the charges are refunded newest first](docs/media/workflow-demo.gif)
+
+`WorkflowContext`: `input`, `runId`, `sessionId`, `cwd`, `signal`, `step(name, fn, { undo })`, `agent(prompt)`,
+`exec(command, { check, undo })`, `log(text)`.
 
 Extra instructions for every session go in `assistant/SYSTEM.md`; a project's own `AGENTS.md` or `CLAUDE.md` is
 picked up automatically when a session works in that folder.
