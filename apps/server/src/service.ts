@@ -528,16 +528,42 @@ export class AssistantService {
 			});
 	}
 
+	/** Every question task (optionally of one session), through all pages. */
+	async #questionTasks(
+		sessionId?: number,
+	): Promise<{ taskId: number; sessionId: number; runId: number; key: string; live: boolean }[]> {
+		return this.harness.commit(async (tx) => {
+			const found: { taskId: number; sessionId: number; runId: number; key: string; live: boolean }[] = [];
+			let cursor: Parameters<typeof tx.scanTasks>[2];
+			do {
+				const page = await tx.scanTasks(
+					{
+						kind: QuestionTask.definition.name,
+						...(sessionId === undefined ? {} : { conversationId: sessionId as never }),
+					},
+					500,
+					cursor,
+				);
+				for (const task of page.items) {
+					const input = task.input as { runId: number; key: string };
+					found.push({
+						taskId: Number(task.id),
+						sessionId: Number(task.conversationId),
+						runId: input.runId,
+						key: input.key,
+						live: task.state.status !== "terminal",
+					});
+				}
+				cursor = page.next;
+			} while (cursor !== undefined);
+			return found;
+		}, context);
+	}
+
 	/** The live question task of a workflow ask, if the run is still waiting for it. */
 	async #liveQuestion(sessionId: number, runId: number, key: string): Promise<number | undefined> {
-		return this.harness.commit(async (tx) => {
-			const page = await tx.scanTasks({ conversationId: sessionId as never, kind: QuestionTask.definition.name }, 500);
-			const task = page.items.find((candidate) => {
-				const input = candidate.input as { runId?: number; key?: string };
-				return input.runId === runId && input.key === key && candidate.state.status !== "terminal";
-			});
-			return task === undefined ? undefined : Number(task.id);
-		}, context);
+		const questions = await this.#questionTasks(sessionId);
+		return questions.find((question) => question.live && question.runId === runId && question.key === key)?.taskId;
 	}
 
 	/**
@@ -571,7 +597,9 @@ export class AssistantService {
 			if (doc.answers[slot] !== undefined) throw new HttpError(409, "Already answered");
 			doc.answers[slot] = value;
 		}, context);
-		await this.harness.abortTask(questionTaskId as never, context);
+		// The deadline may have passed meanwhile; then the run treats the question as expired, whatever was stored.
+		const ended = await this.harness.abortTask(questionTaskId as never, context).catch(() => "terminal" as const);
+		if (ended === "terminal") throw new HttpError(409, "This question expired before the answer arrived");
 	}
 
 	// ---- live feeds ----
@@ -698,18 +726,7 @@ export class AssistantService {
 			});
 		for (const run of runs) this.#trackWorkflow(run.sessionId, run.runId);
 
-		const questions = await this.harness
-			.commit(async (tx) => {
-				const page = await tx.scanTasks({ kind: QuestionTask.definition.name }, 1000);
-				return page.items
-					.filter((task) => task.state.status !== "terminal")
-					.map((task) => ({
-						taskId: Number(task.id),
-						sessionId: Number(task.conversationId),
-						...(task.input as { runId: number; key: string }),
-					}));
-			}, context)
-			.catch(() => []);
+		const questions = (await this.#questionTasks().catch(() => [])).filter((question) => question.live);
 		for (const question of questions) {
 			const answers = await this.harness
 				.snapshot(AnswersDoc, question.sessionId as never, context)

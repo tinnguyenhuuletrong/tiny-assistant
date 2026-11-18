@@ -230,6 +230,23 @@ class AskPark extends Error {
 type Finished = { name: string; value: JsonValue; undo: (value: JsonValue) => Promise<void> | void };
 
 /**
+ * Work that finished after Stop. pi-durable joins a stopped run before its abort handler starts, so a step (or undo)
+ * already in flight completes, but its checkpoint is refused because the task carries an abort mark. The abort
+ * handler runs in this same process right after, and picks the results up here, so a step that took effect is still
+ * undone and an undo that already ran is not repeated. Keyed by run (task) id; cleared when the run ends.
+ */
+const settledAfterStop = new Map<number, { steps: Map<string, JsonValue>; undone: Set<string> }>();
+
+function afterStop(runId: number) {
+	let entry = settledAfterStop.get(runId);
+	if (!entry) {
+		entry = { steps: new Map(), undone: new Set() };
+		settledAfterStop.set(runId, entry);
+	}
+	return entry;
+}
+
+/**
  * The context `run()` sees. In replay mode (used by rollbacks) steps only return stored results and collect their
  * undo callbacks; nothing runs and nothing is logged.
  */
@@ -238,7 +255,7 @@ function createContext(
 	runtime: Runtime,
 	context: Context,
 	cwd: string | undefined,
-	mode: { replay: false } | { replay: true; finished: Finished[] },
+	mode: { replay: false } | { replay: true; finished: Finished[]; inDoubt: string[] },
 	hooks: QuestionHooks,
 ): WorkflowContext<unknown> {
 	const runId = Number(task.id);
@@ -256,28 +273,44 @@ function createContext(
 		const key = `step:${name}`;
 		if (mode.replay && stopped) throw new ReplayStop();
 		const stored = await runtime.memo<{ value: T }>(key, context);
-		if (stored !== undefined) {
+		const handedOver = stored === undefined ? settledAfterStop.get(runId)?.steps.get(name) : undefined;
+		if (stored !== undefined || handedOver !== undefined) {
+			const value = (stored?.value ?? handedOver) as T;
 			if (mode.replay && options?.undo) {
-				mode.finished.push({ name, value: stored.value, undo: options.undo as Finished["undo"] });
+				mode.finished.push({ name, value, undo: options.undo as Finished["undo"] });
 			}
-			return stored.value;
+			return value;
 		}
 		if (mode.replay) {
+			// Started but never finished or failed: the process died (or was stopped) mid-step, so its effect is unknown.
+			const started = await runtime.memo<boolean>(`started:${name}`, context);
+			const failed = await runtime.memo<boolean>(`failed:${name}`, context);
+			if (started !== undefined && failed === undefined && options?.undo) mode.inDoubt.push(name);
 			stopped = true;
 			throw new ReplayStop();
 		}
+		await runtime.memo(`started:${name}`, true, context);
 		await stepEntry(runtime, { runId, step: name, status: "running" }, context);
+		let value: T;
 		try {
-			const value = ((await fn()) ?? null) as T;
-			const kept = await runtime.memo<{ value: T }>(key, { value } as { value: T }, context);
-			await stepEntry(runtime, { runId, step: name, status: "done" }, context);
-			return kept.value;
+			value = ((await fn()) ?? null) as T;
 		} catch (error) {
+			if (runtime.signal.aborted) throw error; // stopped: the abort handler records what happened
+			await runtime.memo(`failed:${name}`, true, context);
 			await stepEntry(
 				runtime,
 				{ runId, step: name, status: "failed", summary: messageOf(error).slice(0, 500) },
 				context,
 			);
+			throw error;
+		}
+		try {
+			const kept = await runtime.memo<{ value: T }>(key, { value } as { value: T }, context);
+			await stepEntry(runtime, { runId, step: name, status: "done" }, context);
+			return kept.value;
+		} catch (error) {
+			// The step took effect but its checkpoint was refused (Stop): hand the result to the abort handler.
+			if (runtime.signal.aborted) afterStop(runId).steps.set(name, value);
 			throw error;
 		}
 	};
@@ -348,6 +381,19 @@ function createContext(
 				stopped = true;
 				throw new ReplayStop();
 			}
+			// Expired is decided by how the question task ended, so an answer stored after the deadline does not count.
+			const questions = await runtime.snapshot(QuestionsDoc, task.id, context);
+			const questionTaskId = questions?.questions[key];
+			const record = questionTaskId === undefined ? undefined : await runtime.getTask(questionTaskId as never, context);
+			if (record?.state.status === "terminal" && record.state.outcome.status === "completed") {
+				hooks.waiting(Number(runtime.conversationId), runId, key, false);
+				await stepEntry(
+					runtime,
+					{ runId, step: key, title: question, status: "failed", summary: "no answer in time" },
+					context,
+				);
+				throw new Error(`No answer to "${question}" in time`);
+			}
 			const answers = await runtime.snapshot(AnswersDoc, runtime.conversationId, context);
 			const answer = answers?.answers[`${runId}:${key}`];
 			if (answer !== undefined) {
@@ -360,28 +406,13 @@ function createContext(
 				hooks.waiting(Number(runtime.conversationId), runId, key, false);
 				return kept.value;
 			}
-			const questions = await runtime.snapshot(QuestionsDoc, task.id, context);
-			const questionTaskId = questions?.questions[key];
-			if (questionTaskId !== undefined) {
-				const record = await runtime.getTask(questionTaskId as never, context);
-				if (record?.state.status === "terminal") {
-					// The question ended without an answer: its deadline passed.
-					hooks.waiting(Number(runtime.conversationId), runId, key, false);
-					await stepEntry(
-						runtime,
-						{ runId, step: key, title: question, status: "failed", summary: "no answer in time" },
-						context,
-					);
-					throw new Error(`No answer to "${question}" in time`);
-				}
-			}
 			const deadline =
 				options?.timeoutMs === undefined
 					? null
 					: await runtime.memo<number>(`deadline:${key}`, runtime.now() + options.timeoutMs, context);
 			throw new AskPark(
 				{ key, question, choices: options?.choices, placeholder: options?.placeholder, deadline },
-				questionTaskId,
+				record?.state.status === "terminal" ? undefined : questionTaskId,
 			);
 		},
 		async log(text, level = "info") {
@@ -413,31 +444,49 @@ async function rollback(
 ): Promise<{ undone: string[]; failures: string[] }> {
 	if (!def) return { undone: [], failures: ["the workflow is no longer installed, so its steps cannot be undone"] };
 	const finished: Finished[] = [];
+	const inDoubt: string[] = [];
 	try {
-		await def.run(createContext(task, runtime, context, cwd, { replay: true, finished }, hooks));
+		await def.run(createContext(task, runtime, context, cwd, { replay: true, finished, inDoubt }, hooks));
 	} catch {
 		// ReplayStop at the step that never finished, or the run's own error: either way `finished` is complete.
 	}
 	const runId = Number(task.id);
 	const undone: string[] = [];
 	const failures: string[] = [];
+	for (const name of inDoubt) {
+		// Say so rather than guess: undoing something that never happened can be as wrong as not undoing it.
+		const message = "interrupted mid-step, so it is unknown whether it took effect: check it by hand";
+		await stepEntry(runtime, { runId, step: name, status: "undo_failed", summary: message }, context);
+		failures.push(`${name}: ${message}`);
+	}
 	for (const step of finished.reverse()) {
 		const key = `undo:${step.name}`;
-		if ((await runtime.memo<boolean>(key, context)) !== undefined) {
+		if (
+			(await runtime.memo<boolean>(key, context)) !== undefined ||
+			settledAfterStop.get(runId)?.undone.has(step.name)
+		) {
 			undone.push(step.name);
 			continue;
 		}
 		await stepEntry(runtime, { runId, step: step.name, status: "undoing" }, context);
 		try {
 			await step.undo(step.value);
-			await runtime.memo(key, true, context);
-			await stepEntry(runtime, { runId, step: step.name, status: "undone" }, context);
-			undone.push(step.name);
 		} catch (error) {
+			if (runtime.signal.aborted) throw error;
 			const message = messageOf(error).slice(0, 500);
 			await stepEntry(runtime, { runId, step: step.name, status: "undo_failed", summary: message }, context);
 			failures.push(`${step.name}: ${message}`);
+			continue;
 		}
+		try {
+			await runtime.memo(key, true, context);
+		} catch (error) {
+			// Undone, but the checkpoint was refused (Stop during the rollback): don't let the abort handler repeat it.
+			if (runtime.signal.aborted) afterStop(runId).undone.add(step.name);
+			throw error;
+		}
+		await stepEntry(runtime, { runId, step: step.name, status: "undone" }, context);
+		undone.push(step.name);
 	}
 	return { undone, failures };
 }
@@ -455,6 +504,7 @@ export function createWorkflowTask(
 	hooks: QuestionHooks = NO_HOOKS,
 ) {
 	const finish = async (task: Task, runtime: Runtime, context: Context, outcome: Outcome) => {
+		settledAfterStop.delete(Number(task.id));
 		const data: WorkflowFinishedData = {
 			runId: Number(task.id),
 			name: task.input.name,
@@ -513,11 +563,15 @@ export function createWorkflowTask(
 
 	const revert = async (task: Task, runtime: Runtime, context: Context, reason: string) => {
 		const def = catalog.get(task.input.name);
-		await appendEntry(
-			runtime,
-			{ kind: WorkflowRollback.kind, data: { runId: Number(task.id), reason } satisfies WorkflowRollbackData },
-			context,
-		);
+		// Announce the rollback once, also when Stop interrupts a rollback that already started.
+		if ((await runtime.memo<boolean>("rollback:announced", context)) === undefined) {
+			await appendEntry(
+				runtime,
+				{ kind: WorkflowRollback.kind, data: { runId: Number(task.id), reason } satisfies WorkflowRollbackData },
+				context,
+			);
+			await runtime.memo("rollback:announced", true, context);
+		}
 		return rollback(def, task, runtime, context, cwdOf(Number(runtime.conversationId)), hooks);
 	};
 

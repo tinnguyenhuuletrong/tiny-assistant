@@ -120,6 +120,14 @@ export function defineWorkflow(definition: {
 	return { kind: "tiny.workflow", ...definition };
 }
 
+/**
+ * Quote a value for a POSIX shell (single quotes), for building `ctx.exec` commands from input. Never interpolate
+ * user text into a command without it: `$(...)` and backticks inside double quotes still run.
+ */
+export function shellQuote(value: string): string {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 export function isWorkflow(value: unknown): value is WorkflowDefinition<unknown> {
 	return typeof value === "object" && value !== null && (value as { kind?: unknown }).kind === "tiny.workflow";
 }

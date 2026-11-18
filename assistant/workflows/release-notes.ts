@@ -1,6 +1,6 @@
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { defineWorkflow, int, obj, opt, str } from "@tiny/core/define";
+import { defineWorkflow, int, obj, opt, shellQuote, str } from "@tiny/core/define";
 
 /**
  * A review loop with a person in it: the agent drafts release notes from the git history, then asks you to publish,
@@ -20,11 +20,15 @@ export default defineWorkflow({
 	],
 	async run(ctx) {
 		if (!ctx.cwd) throw new Error("Run release-notes in a project: it reads the project's git history.");
-		const since = ctx.input.since;
-		const range = since
-			? `--since="${since.replace(/"/g, "")}"`
-			: '$(git describe --tags --abbrev=0 2>/dev/null && echo "..HEAD" || echo "--since=\'2 weeks ago\'")';
-		const history = await ctx.exec(`git log ${range} --no-merges --pretty='- %s (%h)' | head -80`, {
+		let range: string;
+		if (ctx.input.since) range = `--since=${shellQuote(ctx.input.since)}`;
+		else {
+			const tag = await ctx.exec("git describe --tags --abbrev=0", { step: "latest tag" });
+			const latest = tag.exitCode === 0 ? tag.output.trim() : "";
+			range = latest ? `${shellQuote(latest)}..HEAD` : `--since=${shellQuote("2 weeks ago")}`;
+		}
+		// pipefail: a failing `git log` fails the step instead of passing its error text on as "commits".
+		const history = await ctx.exec(`set -o pipefail; git log ${range} --no-merges --pretty='- %s (%h)' | head -80`, {
 			step: "collect commits",
 			check: true,
 		});

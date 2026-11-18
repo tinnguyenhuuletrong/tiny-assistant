@@ -290,7 +290,13 @@ function FieldInput({
 						onChange={(event) => onChange(event.target.value || undefined)}
 						className={inputClass}
 					>
-						{!field.required && <option value="">(none)</option>}
+						{field.required ? (
+							<option value="" disabled>
+								Choose…
+							</option>
+						) : (
+							<option value="">(none)</option>
+						)}
 						{field.options?.map((option) => (
 							<option key={option} value={option}>
 								{option}

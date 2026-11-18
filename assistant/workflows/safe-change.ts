@@ -1,4 +1,4 @@
-import { bool, defineWorkflow, obj, opt, str } from "@tiny/core/define";
+import { bool, defineWorkflow, obj, opt, shellQuote, str } from "@tiny/core/define";
 
 /**
  * Let the agent change the project on a throwaway git branch, then run the tests. If the tests fail (or you press
@@ -36,12 +36,14 @@ export default defineWorkflow({
 		// The rollback discards the branch's changes, so it must not start on top of uncommitted work.
 		if (status.output.trim()) throw new Error("The working tree has uncommitted changes. Commit or stash them first.");
 
-		const start = await ctx.exec("git rev-parse --abbrev-ref HEAD", { step: "remember branch" });
-		const original = start.output.trim();
+		const start = await ctx.exec("git rev-parse --abbrev-ref HEAD", { step: "remember branch", check: true });
+		const original = shellQuote(start.output.trim());
+		const temp = shellQuote(branch);
+		// The tree was clean when the run started, so `git clean` only removes files this attempt created.
 		const undoBranch = ctx.input.keepBranch
-			? `git checkout -f ${original}`
-			: `git checkout -f ${original} && git branch -D ${branch}`;
-		await ctx.exec(`git checkout -b ${branch}`, { step: "create branch", undo: undoBranch });
+			? `git add -A && git commit -q --allow-empty -m 'tiny: failed attempt, kept for inspection' && git checkout -q ${original}`
+			: `git checkout -q -f ${original} && git clean -fdq && git branch -D ${temp}`;
+		await ctx.exec(`git checkout -b ${temp}`, { step: "create branch", check: true, undo: undoBranch });
 
 		await ctx.agent(
 			`${ctx.input.task}\n\nWork in this repository on the current branch (${branch}). Do not commit; I will run \`${test}\` after you finish.`,
@@ -52,9 +54,10 @@ export default defineWorkflow({
 		const result = await ctx.exec(test, { step: "run tests", check: true, timeoutMs: 15 * 60_000 });
 		await ctx.log(result.output.slice(-2000) || "(no output)");
 
-		await ctx.exec(`git add -A && git commit -m ${JSON.stringify(`tiny: ${ctx.input.task}`.slice(0, 72))}`, {
+		await ctx.exec(`git add -A && git commit -q -m ${shellQuote(`tiny: ${ctx.input.task}`.slice(0, 72))}`, {
 			step: "commit",
+			check: true,
 		});
-		return `Done on branch ${branch}. Review it, then merge into ${original}.`;
+		return `Done on branch ${branch}. Review it, then merge into ${start.output.trim()}.`;
 	},
 });

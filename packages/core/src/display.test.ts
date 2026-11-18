@@ -163,4 +163,38 @@ describe("buildDisplay", () => {
 		expect(answered.run.phase).toBe("running");
 		expect(answered.run.question).toBeNull();
 	});
+
+	test("a run whose start is outside the loaded window still shows its steps and question", () => {
+		const wf = (id: number, kind: string, data: unknown): ViewEntry => ({ id, conversationId: 1, kind, data });
+		const items = buildDisplay(
+			[
+				wf(40, "tiny.workflow.step", { runId: 9, step: "draft", status: "done" }),
+				wf(41, "tiny.workflow.ask", { runId: 9, key: "review-1", question: "Publish?", choices: ["Yes", "No"] }),
+			],
+			{},
+		);
+		const card = items[0];
+		if (card?.type !== "workflow-run") throw new Error("expected a run card");
+		expect(card.run.question?.key).toBe("review-1");
+		expect(card.run.steps.map((step) => step.key)).toEqual(["draft"]);
+	});
+
+	test("steps cut off by the end of a run stop looking live", () => {
+		const wf = (id: number, kind: string, data: unknown): ViewEntry => ({ id, conversationId: 1, kind, data });
+		const items = buildDisplay(
+			[
+				wf(1, "tiny.workflow.started", { runId: 5, name: "w", input: {} }),
+				wf(2, "tiny.workflow.step", { runId: 5, step: "slow", status: "running" }),
+				wf(3, "tiny.workflow.step", { runId: 5, step: "ask-1", title: "Go?", status: "waiting" }),
+				wf(4, "tiny.workflow.finished", { runId: 5, name: "w", status: "aborted" }),
+			],
+			{},
+		);
+		const card = items[0];
+		if (card?.type !== "workflow-run") throw new Error("expected a run card");
+		expect(card.run.steps.map((step) => [step.status, step.summary])).toEqual([
+			["failed", "stopped"],
+			["failed", "not answered"],
+		]);
+	});
 });

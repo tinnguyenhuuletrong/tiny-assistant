@@ -165,6 +165,29 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 	const items: DisplayItem[] = [];
 	const tools = new Map<string, ToolState>();
 	const runs = new Map<number, WorkflowRun>();
+	/**
+	 * The run an entry belongs to. When its `started` entry is outside the loaded window (a long run), the card starts
+	 * here instead, so steps, logs, and an open question still show.
+	 */
+	const runFor = (runId: number, entryId: number, name?: string): WorkflowRun => {
+		let run = runs.get(runId);
+		if (!run) {
+			run = {
+				runId,
+				name: name ?? "workflow",
+				input: undefined,
+				phase: "running",
+				steps: [],
+				question: null,
+				logs: [],
+				rollbackReason: null,
+				rolledBack: [],
+			};
+			runs.set(runId, run);
+			items.push({ type: "workflow-run", key: `run${runId}`, entryId, run });
+		}
+		return run;
+	};
 
 	// Tool results first, so calls render with their results attached wherever they are.
 	for (const entry of entries) {
@@ -230,8 +253,7 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 			}
 			case ENTRY_KINDS.workflowStep: {
 				const data = entry.data as WorkflowStepData;
-				const run = runs.get(data.runId);
-				if (!run) break;
+				const run = runFor(data.runId, entry.id);
 				const step = run.steps.find((candidate) => candidate.key === data.step);
 				if (step) {
 					step.status = data.status;
@@ -248,8 +270,8 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 			}
 			case ENTRY_KINDS.workflowAsk: {
 				const data = entry.data as WorkflowAskData;
-				const run = runs.get(data.runId);
-				if (run && (run.phase === "running" || run.phase === "waiting")) {
+				const run = runFor(data.runId, entry.id);
+				if (run.phase === "running" || run.phase === "waiting") {
 					run.question = data;
 					run.phase = "waiting";
 				}
@@ -257,17 +279,15 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 			}
 			case ENTRY_KINDS.workflowLog: {
 				const data = entry.data as WorkflowLogData;
-				runs.get(data.runId)?.logs.push({ text: data.text, level: data.level });
+				runFor(data.runId, entry.id).logs.push({ text: data.text, level: data.level });
 				break;
 			}
 			case ENTRY_KINDS.workflowRollback: {
 				const data = entry.data as WorkflowRollbackData;
-				const run = runs.get(data.runId);
-				if (run) {
-					run.question = null;
-					run.phase = "rolling_back";
-					run.rollbackReason = data.reason;
-				}
+				const run = runFor(data.runId, entry.id);
+				run.question = null;
+				run.phase = "rolling_back";
+				run.rollbackReason = data.reason;
 				break;
 			}
 			case ENTRY_KINDS.workflowFinished: {
@@ -279,6 +299,16 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 					run.result = data.result;
 					run.error = data.error;
 					run.rolledBack = data.rolledBack ?? [];
+					// Nothing is still running once the run ended: close steps that were cut off.
+					for (const step of run.steps) {
+						if (step.status === "running" || step.status === "undoing") {
+							step.status = "failed";
+							step.summary ??= data.status === "aborted" ? "stopped" : "did not finish";
+						} else if (step.status === "waiting") {
+							step.status = "failed";
+							step.summary = "not answered";
+						}
+					}
 				}
 				// Repeat the outcome at the end only when other messages (agent turns) came in between.
 				const previous = items[items.length - 1];

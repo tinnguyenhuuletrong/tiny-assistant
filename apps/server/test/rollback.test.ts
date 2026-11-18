@@ -96,6 +96,28 @@ describe("workflow rollback", () => {
 		expect(await lines(log)).toEqual(["reserve", "release"]);
 	});
 
+	test("Stop during a step still undoes it once it took effect", async () => {
+		fx = fixture();
+		const log = writeSaga(
+			"inflight",
+			`await ctx.step("reserve", () => { log("reserve"); return 1; }, { undo: () => log("release") });
+			await ctx.step("charge", async () => {
+				log("charge start");
+				await new Promise((resolve) => setTimeout(resolve, 400)); // ignores Stop, like a slow payment API
+				log("charged");
+				return "receipt-1";
+			}, { undo: (receipt) => log("refund " + receipt) });
+			await ctx.step("never", () => 1);`,
+		);
+		service = await fx.open();
+		const { sessionId } = await service.runWorkflow({ name: "inflight" });
+		await until("the charge to start", async () => (await lines(log)).includes("charge start"));
+		await service.abort(sessionId);
+		const done = await finished(sessionId);
+		expect(done.data).toMatchObject({ status: "aborted", rolledBack: ["charge", "reserve"] });
+		expect(await lines(log)).toEqual(["reserve", "charge start", "charged", "refund receipt-1", "release"]);
+	});
+
 	test("a crash during the rollback resumes it without undoing anything twice", async () => {
 		fx = fixture();
 		const log = writeSaga(
