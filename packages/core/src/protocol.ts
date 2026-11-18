@@ -51,6 +51,8 @@ export type SessionInfo = {
 	busy: boolean;
 	/** A workflow run is in progress in this session. */
 	workflowRunning: boolean;
+	/** A workflow in this session is waiting for the user to answer a question. */
+	waitingForInput: boolean;
 	/** `provider/modelId` the session runs with. */
 	model: string | null;
 	thinking: ThinkingLevel | null;
@@ -158,6 +160,7 @@ export const ENTRY_KINDS = {
 	workflowStep: "tiny.workflow.step",
 	workflowLog: "tiny.workflow.log",
 	workflowRollback: "tiny.workflow.rollback",
+	workflowAsk: "tiny.workflow.ask",
 	workflowFinished: "tiny.workflow.finished",
 } as const;
 
@@ -169,8 +172,22 @@ export type WorkflowStepData = {
 	 * `running` when a step starts, then `done` or `failed`. During a rollback: `undoing`, then `undone` or
 	 * `undo_failed`.
 	 */
-	status: "running" | "done" | "failed" | "undoing" | "undone" | "undo_failed";
+	status: "running" | "waiting" | "done" | "failed" | "undoing" | "undone" | "undo_failed";
 	summary?: string;
+	/** Display name when it differs from the step's key (questions show their text). */
+	title?: string;
+};
+
+/** A workflow asks the user something and waits for the answer. */
+export type WorkflowAskData = {
+	runId: number;
+	key: string;
+	question: string;
+	/** When set, the answer must be one of these. */
+	choices?: string[];
+	placeholder?: string;
+	/** Epoch ms after which the question expires, when it has a timeout. */
+	deadline?: number;
 };
 export type WorkflowLogData = { runId: number; text: string; level: "info" | "warn" | "error" };
 /** Written when a failed or stopped run starts reverting its finished steps. */

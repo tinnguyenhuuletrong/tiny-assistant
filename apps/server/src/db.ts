@@ -159,6 +159,7 @@ export class AppDb {
 			pinned: row.pinned === 1,
 			busy,
 			workflowRunning: false,
+			waitingForInput: false,
 			model: row.model,
 			thinking: row.thinking as ThinkingLevel | null,
 			cwd: row.cwd,
@@ -181,7 +182,9 @@ export class AppDb {
 		return row ? this.#toSession(row, busy) : undefined;
 	}
 
-	insertSession(session: Omit<SessionInfo, "busy" | "workflowRunning" | "archived" | "pinned" | "preview">): void {
+	insertSession(
+		session: Omit<SessionInfo, "busy" | "workflowRunning" | "waitingForInput" | "archived" | "pinned" | "preview">,
+	): void {
 		this.#db
 			.query(
 				`INSERT INTO app_sessions (id, project_id, title, created_at, updated_at, model, thinking, cwd, workflow)

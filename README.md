@@ -168,8 +168,35 @@ Every run is drawn live in the session: steps as they start and finish, and the 
 
 ![A checkout workflow: three charges succeed, the fourth card is declined, and the charges are refunded newest first](docs/media/workflow-demo.gif)
 
+### Human in the loop
+
+`ctx.ask()` stops the run until a person answers, then continues with the answer:
+
+```ts
+// assistant/workflows/expense-approval.ts (abridged)
+await ctx.step("reserve budget", () => reserve(amount), { undo: (r) => release(r.id) });
+const decision = await ctx.ask(`Approve ${amount} for "${description}"?`, {
+	choices: ["Approve", "Reject"],
+	timeoutMs: 30 * 60_000, // optional: no answer in time fails the run (and rolls back)
+});
+if (decision !== "Approve") throw new Error("Rejected"); // rolls back the reservation
+await ctx.step("pay", () => pay(amount));
+```
+
+- The question appears in the session with its choices (or a text box). Waiting sessions get a "needs you" badge,
+  and the TUI answers with `/answer`.
+- While it waits, the run holds no process: it is a sleeping pi-durable task, so it can wait for days and survives
+  restarts. Answering wakes it at once; finished steps return their stored results, and `ask` returns the answer.
+- Stop, a rejection you turn into an error, or the timeout roll back the finished steps like any failure.
+- [`release-notes`](assistant/workflows/release-notes.ts) loops on it: the agent drafts, you pick Publish, Revise
+  (then say what to change), or Cancel.
+
+([MP4](docs/media/approval-demo.mp4))
+
+![An expense approval: the run reserves budget, waits for a person, and pays once approved](docs/media/approval-demo.gif)
+
 `WorkflowContext`: `input`, `runId`, `sessionId`, `cwd`, `signal`, `step(name, fn, { undo })`, `agent(prompt)`,
-`exec(command, { check, undo })`, `log(text)`.
+`exec(command, { check, undo })`, `ask(question, { choices, timeoutMs })`, `log(text)`.
 
 Extra instructions for every session go in `assistant/SYSTEM.md`; a project's own `AGENTS.md` or `CLAUDE.md` is
 picked up automatically when a session works in that folder.
@@ -189,6 +216,7 @@ All clients use `@tiny/core`'s `AssistantClient`. Raw endpoints:
 | `POST /api/sessions/:id/abort` · `/compact` · `/reset`                                    |                                                                                          |
 | `GET /api/sessions/:id/entries?before=&limit=`                                            | older transcript pages                                                                   |
 | `POST /api/workflows/run` `{ name, input?, sessionId?, projectId? }`                      |                                                                                          |
+| `POST /api/workflows/:runId/answer` `{ sessionId, key, value }`                           | answer a question a workflow is waiting on                                               |
 | `GET /api/search?q=`                                                                      | full-text search over all sessions                                                       |
 | `GET /api/stats?session=`                                                                 | per-run metrics                                                                          |
 | `WS /ws`                                                                                  | `state` / `sessions` broadcasts; `subscribe` to a session for its view, then delta `ops` |

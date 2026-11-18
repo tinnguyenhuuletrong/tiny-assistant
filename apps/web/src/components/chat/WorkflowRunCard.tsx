@@ -1,16 +1,18 @@
-import type { WorkflowRun, WorkflowStepStatus } from "@tiny/core";
-import { ChevronRight, Workflow } from "lucide-react";
+import type { WorkflowAskData, WorkflowRun, WorkflowStepStatus } from "@tiny/core";
+import { ChevronRight, MessageCircleQuestion, Send, Workflow } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { client } from "../../lib/client.ts";
 import { cn } from "../../lib/format.ts";
+import { attempt } from "../../lib/toast.ts";
 import { Markdown } from "./Markdown.tsx";
 
 /**
  * A workflow run as a live diagram: a rail of step nodes (running ones pulse), and, when the run fails or is stopped,
  * a rollback lane with arrows back into every step that was undone.
  */
-export function WorkflowRunCard({ run }: { run: WorkflowRun }) {
+export function WorkflowRunCard({ run, sessionId }: { run: WorkflowRun; sessionId: number }) {
 	const [showLogs, setShowLogs] = useState(false);
-	const active = run.phase === "running" || run.phase === "rolling_back";
+	const active = run.phase === "running" || run.phase === "waiting" || run.phase === "rolling_back";
 	return (
 		<div className="overflow-hidden rounded-2xl border border-border bg-surface/60">
 			<div className="flex items-center gap-2 border-border/70 border-b px-4 py-2.5">
@@ -29,6 +31,8 @@ export function WorkflowRunCard({ run }: { run: WorkflowRun }) {
 					<p className="px-1 text-muted text-sm">{active ? "Starting…" : "No steps ran."}</p>
 				)}
 			</div>
+
+			{run.question && <QuestionBox key={run.question.key} question={run.question} sessionId={sessionId} />}
 
 			{run.logs.length > 0 && (
 				<div className="border-border/70 border-t px-4 py-2">
@@ -67,13 +71,14 @@ export function WorkflowRunCard({ run }: { run: WorkflowRun }) {
 function PhaseBadge({ phase }: { phase: WorkflowRun["phase"] }) {
 	const styles: Record<WorkflowRun["phase"], [string, string]> = {
 		running: ["Running", "bg-accent/12 text-accent"],
+		waiting: ["Waiting for you", "bg-accent text-accent-fg"],
 		rolling_back: ["Rolling back", "bg-warn/15 text-warn"],
 		completed: ["Completed", "bg-success/12 text-success"],
 		failed: ["Failed", "bg-danger/12 text-danger"],
 		aborted: ["Stopped", "bg-warn/15 text-warn"],
 	};
 	const [label, style] = styles[phase];
-	const live = phase === "running" || phase === "rolling_back";
+	const live = phase === "running" || phase === "waiting" || phase === "rolling_back";
 	return (
 		<span className={cn("ml-auto flex items-center gap-1.5 rounded-full px-2 py-0.5 font-medium text-xs", style)}>
 			{live && <span className="size-1.5 rounded-full bg-current motion-safe:animate-pulse" />}
@@ -83,7 +88,7 @@ function PhaseBadge({ phase }: { phase: WorkflowRun["phase"] }) {
 }
 
 function Outcome({ run }: { run: WorkflowRun }) {
-	if (run.phase === "running" || run.phase === "rolling_back") return null;
+	if (run.phase === "running" || run.phase === "waiting" || run.phase === "rolling_back") return null;
 	const result = run.result;
 	return (
 		<div className="space-y-1 border-border/70 border-t px-4 py-2.5 text-sm">
@@ -110,6 +115,7 @@ function Outcome({ run }: { run: WorkflowRun }) {
 
 const STATUS: Record<WorkflowStepStatus, { label: string; color: string; live?: boolean; struck?: boolean }> = {
 	running: { label: "running", color: "var(--accent)", live: true },
+	waiting: { label: "waiting for your answer", color: "var(--accent)", live: true },
 	done: { label: "done", color: "var(--success)" },
 	failed: { label: "failed", color: "var(--danger)" },
 	undoing: { label: "undoing", color: "var(--warn)", live: true },
@@ -200,7 +206,7 @@ function StepGraph({ run }: { run: WorkflowRun }) {
 					const style = STATUS[step.status];
 					const secondary = step.summary ?? style.label;
 					return (
-						<g key={step.name}>
+						<g key={step.key}>
 							<StatusDot x={RAIL_X} y={center(index)} status={step.status} />
 							<rect
 								x={NODE_X}
@@ -269,7 +275,7 @@ function StepGraph({ run }: { run: WorkflowRun }) {
 						/>
 						{undoSteps.map(({ step, index }) => (
 							<line
-								key={step.name}
+								key={step.key}
 								x1={laneX}
 								x2={NODE_X + nodeWidth + 3}
 								y1={center(index)}
@@ -298,7 +304,8 @@ function StepGraph({ run }: { run: WorkflowRun }) {
 
 function StatusDot({ x, y, status }: { x: number; y: number; status: WorkflowStepStatus }) {
 	const style = STATUS[status];
-	const filled = status === "done" || status === "failed" || status === "undone" || status === "undo_failed";
+	const filled =
+		status === "done" || status === "failed" || status === "undone" || status === "undo_failed" || status === "waiting";
 	return (
 		<g>
 			{style.live && (
@@ -322,6 +329,19 @@ function StatusDot({ x, y, status }: { x: number; y: number; status: WorkflowSte
 					stroke="var(--surface)"
 					strokeWidth={1.6}
 				/>
+			)}
+			{status === "waiting" && (
+				<text
+					x={x}
+					y={y + 0.5}
+					fontSize={9}
+					fontWeight={700}
+					fill="var(--surface)"
+					textAnchor="middle"
+					dominantBaseline="central"
+				>
+					?
+				</text>
 			)}
 			{status === "undone" && (
 				<text
@@ -351,6 +371,77 @@ function SingleStep({ name, status, summary }: { name: string; status: WorkflowS
 			<span className="text-xs" style={{ color: style.color }}>
 				{summary ?? style.label}
 			</span>
+		</div>
+	);
+}
+
+/** The question a waiting run asks: choices as buttons, otherwise a text answer. */
+export function QuestionBox({ question, sessionId }: { question: WorkflowAskData; sessionId: number }) {
+	const [text, setText] = useState("");
+	const [sending, setSending] = useState<string | null>(null);
+	const answer = async (value: string) => {
+		if (!value.trim() || sending) return;
+		setSending(value);
+		await attempt(() => client.answerWorkflow({ sessionId, runId: question.runId, key: question.key, value }));
+		setSending(null);
+	};
+	const deadline = question.deadline ? new Date(question.deadline) : null;
+	return (
+		<div className="border-accent/30 border-t bg-accent/5 px-4 py-3">
+			<div className="flex items-start gap-2">
+				<MessageCircleQuestion className="mt-0.5 size-4 shrink-0 text-accent" />
+				<div className="min-w-0 flex-1">
+					<p className="whitespace-pre-wrap font-medium text-sm">{question.question}</p>
+					{deadline && (
+						<p className="mt-0.5 text-faint text-xs">
+							Answer by {deadline.toLocaleString()}, or the run is rolled back.
+						</p>
+					)}
+				</div>
+			</div>
+			{question.choices?.length ? (
+				<div className="mt-3 flex flex-wrap gap-2 pl-6">
+					{question.choices.map((choice, index) => (
+						<button
+							key={choice}
+							type="button"
+							disabled={sending !== null}
+							onClick={() => void answer(choice)}
+							className={cn(
+								"rounded-lg border px-3 py-1.5 font-medium text-sm transition-colors disabled:opacity-60",
+								index === 0
+									? "border-transparent bg-fg text-bg hover:opacity-90"
+									: "border-border bg-surface text-fg hover:border-border-strong",
+							)}
+						>
+							{sending === choice ? "Sending…" : choice}
+						</button>
+					))}
+				</div>
+			) : (
+				<form
+					className="mt-3 flex gap-2 pl-6"
+					onSubmit={(event) => {
+						event.preventDefault();
+						void answer(text);
+					}}
+				>
+					<input
+						value={text}
+						onChange={(event) => setText(event.target.value)}
+						placeholder={question.placeholder ?? "Your answer"}
+						className="min-w-0 flex-1 rounded-lg border border-border bg-bg px-3 py-1.5 text-base outline-none focus:border-border-strong md:text-sm"
+					/>
+					<button
+						type="submit"
+						disabled={!text.trim() || sending !== null}
+						aria-label="Send answer"
+						className="flex items-center gap-1.5 rounded-lg bg-fg px-3 py-1.5 font-medium text-bg text-sm disabled:opacity-40"
+					>
+						<Send className="size-3.5" /> Answer
+					</button>
+				</form>
+			)}
 		</div>
 	);
 }

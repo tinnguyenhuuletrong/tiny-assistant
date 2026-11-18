@@ -6,6 +6,7 @@ import {
 	type ConversationViewValue,
 	ENTRY_KINDS,
 	type ViewEntry,
+	type WorkflowAskData,
 	type WorkflowFinishedData,
 	type WorkflowLogData,
 	type WorkflowRollbackData,
@@ -43,10 +44,12 @@ export type WorkflowRun = {
 	runId: number;
 	name: string;
 	input: unknown;
-	/** `rolling_back` from the rollback entry until the run finishes. */
-	phase: "running" | "rolling_back" | "completed" | "failed" | "aborted";
-	/** Steps in the order they started, each with its latest status. */
-	steps: { name: string; status: WorkflowStepStatus; summary?: string }[];
+	/** `waiting` while a question is open; `rolling_back` from the rollback entry until the run finishes. */
+	phase: "running" | "waiting" | "rolling_back" | "completed" | "failed" | "aborted";
+	/** Steps in the order they started, each with its latest status. `name` is what to show; `key` identifies it. */
+	steps: { key: string; name: string; status: WorkflowStepStatus; summary?: string }[];
+	/** The question the run is waiting on, if any. */
+	question: WorkflowAskData | null;
 	logs: { text: string; level: "info" | "warn" | "error" }[];
 	rollbackReason: string | null;
 	result?: unknown;
@@ -216,6 +219,7 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 					input: data.input,
 					phase: "running",
 					steps: [],
+					question: null,
 					logs: [],
 					rollbackReason: null,
 					rolledBack: [],
@@ -228,11 +232,27 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 				const data = entry.data as WorkflowStepData;
 				const run = runs.get(data.runId);
 				if (!run) break;
-				const step = run.steps.find((candidate) => candidate.name === data.step);
+				const step = run.steps.find((candidate) => candidate.key === data.step);
 				if (step) {
 					step.status = data.status;
 					step.summary = data.summary;
-				} else run.steps.push({ name: data.step, status: data.status, summary: data.summary });
+				} else {
+					run.steps.push({ key: data.step, name: data.title ?? data.step, status: data.status, summary: data.summary });
+				}
+				// An answered (or expired) question closes.
+				if (run.question?.key === data.step && data.status !== "waiting") {
+					run.question = null;
+					if (run.phase === "waiting") run.phase = "running";
+				}
+				break;
+			}
+			case ENTRY_KINDS.workflowAsk: {
+				const data = entry.data as WorkflowAskData;
+				const run = runs.get(data.runId);
+				if (run && (run.phase === "running" || run.phase === "waiting")) {
+					run.question = data;
+					run.phase = "waiting";
+				}
 				break;
 			}
 			case ENTRY_KINDS.workflowLog: {
@@ -244,6 +264,7 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 				const data = entry.data as WorkflowRollbackData;
 				const run = runs.get(data.runId);
 				if (run) {
+					run.question = null;
 					run.phase = "rolling_back";
 					run.rollbackReason = data.reason;
 				}
@@ -253,6 +274,7 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 				const data = entry.data as WorkflowFinishedData;
 				const run = runs.get(data.runId);
 				if (run) {
+					run.question = null;
 					run.phase = data.status;
 					run.result = data.result;
 					run.error = data.error;

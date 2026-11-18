@@ -114,8 +114,8 @@ describe("buildDisplay", () => {
 		if (card?.type !== "workflow-run") throw new Error("expected a run card");
 		expect(card.run.phase).toBe("rolling_back");
 		expect(card.run.steps).toEqual([
-			{ name: "charge visa", status: "undoing", summary: undefined },
-			{ name: "charge amex", status: "failed", summary: "declined" },
+			{ key: "charge visa", name: "charge visa", status: "undoing", summary: undefined },
+			{ key: "charge amex", name: "charge amex", status: "failed", summary: "declined" },
 		]);
 		expect(card.run.logs).toHaveLength(1);
 
@@ -137,5 +137,30 @@ describe("buildDisplay", () => {
 		expect(done).toHaveLength(1);
 		if (done[0]?.type !== "workflow-run") throw new Error("expected a run card");
 		expect(done[0].run).toMatchObject({ phase: "failed", error: "declined", rolledBack: ["charge visa"] });
+	});
+
+	test("a question puts the run in the waiting phase until it is answered", () => {
+		const wf = (id: number, kind: string, data: unknown): ViewEntry => ({ id, conversationId: 1, kind, data });
+		const entries: ViewEntry[] = [
+			wf(1, "tiny.workflow.started", { runId: 3, name: "approval", input: {} }),
+			wf(2, "tiny.workflow.ask", { runId: 3, key: "ask-1", question: "Approve?", choices: ["Yes", "No"] }),
+			wf(3, "tiny.workflow.step", { runId: 3, step: "ask-1", title: "Approve?", status: "waiting" }),
+		];
+		const waiting = buildDisplay(entries, {})[0];
+		if (waiting?.type !== "workflow-run") throw new Error("expected a run card");
+		expect(waiting.run.phase).toBe("waiting");
+		expect(waiting.run.question).toMatchObject({ key: "ask-1", choices: ["Yes", "No"] });
+		expect(waiting.run.steps[0]).toMatchObject({ key: "ask-1", name: "Approve?", status: "waiting" });
+
+		const answered = buildDisplay(
+			[
+				...entries,
+				wf(4, "tiny.workflow.step", { runId: 3, step: "ask-1", title: "Approve?", status: "done", summary: "→ Yes" }),
+			],
+			{},
+		)[0];
+		if (answered?.type !== "workflow-run") throw new Error("expected a run card");
+		expect(answered.run.phase).toBe("running");
+		expect(answered.run.question).toBeNull();
 	});
 });

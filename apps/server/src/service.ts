@@ -37,8 +37,11 @@ import { UserCodeLoader } from "./loader.ts";
 import { availableModels, createModelRegistry, parseModelKey, pickDefaultModel } from "./models.ts";
 import { createPromptExtension } from "./prompt.ts";
 import {
+	AnswersDoc,
 	createWorkflowExtension,
 	createWorkflowTask,
+	QuestionTask,
+	WorkflowAsk,
 	WorkflowCatalog,
 	WorkflowStarted,
 	type WorkflowTaskDef,
@@ -107,6 +110,8 @@ export class AssistantService {
 	readonly #indexing = new Map<number, Promise<void>>();
 	readonly #busy = new Set<number>();
 	readonly #runningWorkflows = new Map<number, Set<number>>();
+	/** Questions waiting for an answer, per session, as `<runId>:<key>`. */
+	readonly #waiting = new Map<number, Set<string>>();
 	readonly #sessionsListeners = new Set<() => void>();
 	readonly #registryListeners = new Set<() => void>();
 	#sessionsTimer: ReturnType<typeof setTimeout> | undefined;
@@ -142,13 +147,15 @@ export class AssistantService {
 		const registry = createRegistry();
 		const workflows = new WorkflowCatalog();
 		const cwdOf = (sessionId: number) => db.session(sessionId)?.cwd ?? undefined;
-		const workflowTask = createWorkflowTask(workflows, cwdOf);
+		let service: AssistantService | undefined;
+		const workflowTask = createWorkflowTask(workflows, cwdOf, {
+			waiting: (sessionId, runId, key, open) => service?.setWaiting(sessionId, `${runId}:${key}`, open),
+		});
 
 		registry.install(CodingTools);
 		registry.install(createPromptExtension(config.assistantDir));
 		registry.install(createWorkflowExtension(workflowTask));
 
-		let service: AssistantService | undefined;
 		const loader = new UserCodeLoader(config.assistantDir, registry, workflows, () => service?.notifyRegistryChanged());
 		await loader.loadAll();
 
@@ -248,7 +255,22 @@ export class AssistantService {
 
 	#withActivity(session: SessionInfo): SessionInfo {
 		const workflowRunning = (this.#runningWorkflows.get(session.id)?.size ?? 0) > 0;
-		return workflowRunning ? { ...session, workflowRunning } : session;
+		const waitingForInput = (this.#waiting.get(session.id)?.size ?? 0) > 0;
+		return workflowRunning || waitingForInput ? { ...session, workflowRunning, waitingForInput } : session;
+	}
+
+	/** Called by the workflow engine when a question starts or stops waiting. */
+	setWaiting(sessionId: number, question: string, open: boolean): void {
+		let set = this.#waiting.get(sessionId);
+		if (open) {
+			if (!set) {
+				set = new Set();
+				this.#waiting.set(sessionId, set);
+			}
+			if (set.has(question)) return;
+			set.add(question);
+		} else if (!set?.delete(question)) return;
+		this.#sessionsChanged();
 	}
 
 	state(): ServerState {
@@ -499,9 +521,57 @@ export class AssistantService {
 			.catch(() => undefined)
 			.finally(() => {
 				runs.delete(runId);
+				const waiting = this.#waiting.get(sessionId);
+				for (const question of waiting ?? []) if (question.startsWith(`${runId}:`)) waiting?.delete(question);
 				this.#sessionsChanged();
 				void this.#indexSession(sessionId, undefined);
 			});
+	}
+
+	/** The live question task of a workflow ask, if the run is still waiting for it. */
+	async #liveQuestion(sessionId: number, runId: number, key: string): Promise<number | undefined> {
+		return this.harness.commit(async (tx) => {
+			const page = await tx.scanTasks({ conversationId: sessionId as never, kind: QuestionTask.definition.name }, 500);
+			const task = page.items.find((candidate) => {
+				const input = candidate.input as { runId?: number; key?: string };
+				return input.runId === runId && input.key === key && candidate.state.status !== "terminal";
+			});
+			return task === undefined ? undefined : Number(task.id);
+		}, context);
+	}
+
+	/**
+	 * Answer a workflow's question. The answer is stored first (first answer wins), then the question task is ended,
+	 * which wakes the run. If the daemon dies in between, startup finishes the delivery.
+	 */
+	async answerWorkflow(input: { sessionId: number; runId: number; key: string; value: string }): Promise<void> {
+		const conversation = await this.#conversation(input.sessionId);
+		const value = String(input.value ?? "").trim();
+		if (!value) throw new HttpError(400, "Empty answer");
+		let ask: { choices?: string[] } | undefined;
+		let cursor: unknown;
+		do {
+			const page = await conversation.entries({}, 200, cursor as never, context);
+			const found = page.items.find((entry) => {
+				const data = entry.data as { runId?: number; key?: string } | undefined;
+				return entry.kind === WorkflowAsk.kind && data?.runId === input.runId && data?.key === input.key;
+			});
+			if (found) ask = found.data as { choices?: string[] };
+			cursor = page.next;
+		} while (!ask && cursor !== undefined);
+		if (!ask) throw new HttpError(404, "No such question");
+		if (ask.choices?.length && !ask.choices.includes(value)) {
+			throw new HttpError(400, `Answer must be one of: ${ask.choices.join(", ")}`);
+		}
+		const questionTaskId = await this.#liveQuestion(input.sessionId, input.runId, input.key);
+		if (questionTaskId === undefined) throw new HttpError(409, "This question is no longer waiting for an answer");
+		await conversation.commit(async (tx) => {
+			const doc = await tx.doc(AnswersDoc, conversation.id);
+			const slot = `${input.runId}:${input.key}`;
+			if (doc.answers[slot] !== undefined) throw new HttpError(409, "Already answered");
+			doc.answers[slot] = value;
+		}, context);
+		await this.harness.abortTask(questionTaskId as never, context);
 	}
 
 	// ---- live feeds ----
@@ -627,6 +697,28 @@ export class AssistantService {
 				return [];
 			});
 		for (const run of runs) this.#trackWorkflow(run.sessionId, run.runId);
+
+		const questions = await this.harness
+			.commit(async (tx) => {
+				const page = await tx.scanTasks({ kind: QuestionTask.definition.name }, 1000);
+				return page.items
+					.filter((task) => task.state.status !== "terminal")
+					.map((task) => ({
+						taskId: Number(task.id),
+						sessionId: Number(task.conversationId),
+						...(task.input as { runId: number; key: string }),
+					}));
+			}, context)
+			.catch(() => []);
+		for (const question of questions) {
+			const answers = await this.harness
+				.snapshot(AnswersDoc, question.sessionId as never, context)
+				.catch(() => undefined);
+			if (answers?.answers[`${question.runId}:${question.key}`] !== undefined) {
+				// Answered, but the daemon stopped before the run was woken: finish the delivery.
+				await this.harness.abortTask(question.taskId as never, context).catch(() => undefined);
+			} else this.setWaiting(question.sessionId, `${question.runId}:${question.key}`, true);
+		}
 	}
 
 	// ---- indexing and run metrics ----

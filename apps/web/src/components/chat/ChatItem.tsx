@@ -335,7 +335,7 @@ function ItemView({ item, sessionId, models, isLast, endOfTurn }: Props) {
 		case "workflow":
 			return <WorkflowRow event={item.event} />;
 		case "workflow-run":
-			return <WorkflowRunCard run={item.run} />;
+			return <WorkflowRunCard run={item.run} sessionId={sessionId} />;
 		case "notice":
 			return <Notice item={item} sessionId={sessionId} />;
 	}

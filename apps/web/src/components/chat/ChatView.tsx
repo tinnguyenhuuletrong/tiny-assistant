@@ -5,6 +5,7 @@ import {
 	CircleAlert,
 	Ellipsis,
 	Layers,
+	MessageCircleQuestion,
 	PanelLeft,
 	RotateCcw,
 	SquarePen,
@@ -22,6 +23,7 @@ import { Spinner } from "../ui/Spinner.tsx";
 import { Composer, type SlashCommand } from "./Composer.tsx";
 import { MessageList } from "./MessageList.tsx";
 import { ModelPicker, ThinkingPicker } from "./Pickers.tsx";
+import { QuestionBox } from "./WorkflowRunCard.tsx";
 
 export const CHAT_COMMANDS: SlashCommand[] = [
 	{ name: "new", description: "Start a new chat" },
@@ -124,6 +126,10 @@ export function ChatView({ sessionId }: { sessionId: number }) {
 		return client.send(sessionId, text, busy ? mode : "followUp");
 	};
 
+	const questionIndex = items.findLastIndex((item) => item.type === "workflow-run" && item.run.question !== null);
+	const questionItem = items[questionIndex];
+	const pendingQuestion = questionItem?.type === "workflow-run" ? questionItem.run.question : null;
+	const questionCardIsLast = questionIndex === items.length - 1;
 	const lastItem = items[items.length - 1];
 	const streamingNow = lastItem?.type === "assistant" && lastItem.streaming;
 
@@ -140,10 +146,26 @@ export function ChatView({ sessionId }: { sessionId: number }) {
 					<Spinner className="size-3" /> Compacting context…
 				</div>
 			)}
-			{busy && !streamingNow && !live.retry && !live.compacting && (
-				<div className="flex items-center gap-2">
-					<Spinner className="size-3" /> Working…
-				</div>
+			{session?.waitingForInput && !live.busy ? (
+				pendingQuestion && !questionCardIsLast ? (
+					// The run card is further up (agent turns came after it): answer here, next to the composer.
+					<div className="overflow-hidden rounded-2xl border border-accent/30">
+						<QuestionBox question={pendingQuestion} sessionId={sessionId} />
+					</div>
+				) : (
+					<div className="flex items-center gap-2 text-accent">
+						<MessageCircleQuestion className="size-3.5" /> Waiting for your answer
+					</div>
+				)
+			) : (
+				busy &&
+				!streamingNow &&
+				!live.retry &&
+				!live.compacting && (
+					<div className="flex items-center gap-2">
+						<Spinner className="size-3" /> Working…
+					</div>
+				)
 			)}
 			{live.queued > 0 && (
 				<div>

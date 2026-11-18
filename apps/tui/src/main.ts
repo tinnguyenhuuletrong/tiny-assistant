@@ -166,6 +166,7 @@ function workflowRunText(run: WorkflowRun, expanded: boolean): string {
 	const spin = SPINNER[ui.spinner % SPINNER.length]!;
 	const phase: Record<WorkflowRun["phase"], string> = {
 		running: c.accent(`${spin} running`),
+		waiting: c.inverse(c.accent(" waiting for you ")),
 		rolling_back: c.yellow(`${spin} rolling back`),
 		completed: c.green("✓ completed"),
 		failed: c.red("✗ failed"),
@@ -175,6 +176,7 @@ function workflowRunText(run: WorkflowRun, expanded: boolean): string {
 	const icon = (status: WorkflowStepStatus): string =>
 		({
 			running: c.accent(spin),
+			waiting: c.accent("?"),
 			done: c.green("✓"),
 			failed: c.red("✗"),
 			undoing: c.yellow(spin),
@@ -191,6 +193,11 @@ function workflowRunText(run: WorkflowRun, expanded: boolean): string {
 				: "";
 		lines.push(`  ${c.dim(last ? "└─" : "├─")} ${icon(step.status)} ${struck}${note}`);
 	});
+	if (run.question) {
+		const { question, choices } = run.question;
+		lines.push(`  ${c.accent("?")} ${c.bold(question)}`);
+		lines.push(`    ${c.dim(choices?.length ? `${choices.join(" / ")}  · /answer to pick` : "/answer <your answer>")}`);
+	}
 	if (run.rollbackReason)
 		lines.push(`  ${c.yellow("↩ undo")} ${c.dim(`finished steps, newest first (${run.rollbackReason})`)}`);
 	const logs = expanded ? run.logs : run.logs.slice(-3);
@@ -380,7 +387,11 @@ function render(): void {
 
 	const live = view ? summarizeLive(view.value.docs) : undefined;
 	const workflowBusy = Boolean(session?.workflowRunning) && !live?.busy;
-	if (ui.notice) {
+	if (!ui.notice && session?.waitingForInput) {
+		status.setText(
+			`${c.inverse(c.accent(" ? "))} ${c.bold("A workflow is waiting for your answer")} ${c.dim("· /answer")}`,
+		);
+	} else if (ui.notice) {
 		status.setText(ui.notice.level === "error" ? c.red(ui.notice.text) : c.cyan(ui.notice.text));
 	} else if (live?.busy || workflowBusy) {
 		const spin = c.accent(SPINNER[ui.spinner % SPINNER.length]!);
@@ -526,7 +537,7 @@ async function command(line: string): Promise<void> {
 	switch (name) {
 		case "help":
 			notify(
-				"/new /sessions /project [path] /model /thinking <lvl> /run <wf> [json] /rename /archive /pin /compact /reset /continue /steer /earlier /quit",
+				"/new /sessions /project [path] /model /thinking <lvl> /run <wf> [json] /answer /rename /archive /pin /compact /reset /continue /steer /earlier /quit",
 			);
 			return;
 		case "new":
@@ -622,6 +633,32 @@ async function command(line: string): Promise<void> {
 			else await start(workflow, JSON.parse(json.join(" ")));
 			return;
 		}
+		case "answer": {
+			const sessionId = needSession();
+			const view = client.views.get(sessionId);
+			const pending = view
+				? buildDisplay(client.entries(sessionId), view.value.docs)
+						.flatMap((item) => (item.type === "workflow-run" && item.run.question ? [item.run.question] : []))
+						.at(-1)
+				: undefined;
+			if (!pending) {
+				notify("No workflow is waiting for an answer here");
+				return;
+			}
+			const send = async (value: string) => {
+				await client.answerWorkflow({ sessionId, runId: pending.runId, key: pending.key, value });
+				notify(`Answered: ${value}`);
+			};
+			if (arg) await send(arg);
+			else if (pending.choices?.length) {
+				pick(
+					pending.choices.map((choice) => ({ value: choice, label: choice })),
+					(item) => send(item.value),
+					pending.question,
+				);
+			} else notify(`Type /answer <your answer> to: ${pending.question}`);
+			return;
+		}
 		case "rename":
 			await client.updateSession(needSession(), { title: arg });
 			return;
@@ -680,6 +717,7 @@ const commands: SlashCommand[] = [
 				.filter((wf) => wf.name.startsWith(prefix))
 				.map((wf) => ({ value: wf.name, label: wf.name, description: wf.description })),
 	},
+	{ name: "answer", description: "Answer the question a workflow is waiting on", argumentHint: "[answer]" },
 	{ name: "rename", description: "Rename this session", argumentHint: "<title>" },
 	{ name: "pin", description: "Pin / unpin this session" },
 	{ name: "archive", description: "Archive this session" },

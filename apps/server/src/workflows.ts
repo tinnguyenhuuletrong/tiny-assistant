@@ -10,10 +10,15 @@
  *   their `undo` callbacks (replay stops at the first step that never finished), then runs the undos newest first.
  *   Each undo is memoized (`undo:<step>`), so none runs twice.
  * - Stopping the session aborts the task; its abort handler runs the same rollback, then ends `aborted`.
+ * - Human in the loop: `ask()` parks the run. In one commit it writes the question to the session and creates a small
+ *   owned "question" task that just sleeps, and the run waits on it (no process held). Answering stores the answer in
+ *   the session's answers document and aborts the question task, which wakes the run; `run()` replays to the `ask`,
+ *   which now returns the answer. A question task that ends on its own means its deadline passed.
  */
 import type { Context } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
 import {
+	defineDoc,
 	defineEntry,
 	defineExtension,
 	defineTask,
@@ -22,9 +27,10 @@ import {
 	type TaskRuntime,
 } from "@earendil-works/pi-durable";
 import { compile } from "@earendil-works/pi-schema";
-import type { ExecResult, StepOptions, WorkflowContext, WorkflowDefinition } from "@tiny/core/define";
+import type { AskOptions, ExecResult, StepOptions, WorkflowContext, WorkflowDefinition } from "@tiny/core/define";
 import {
 	ENTRY_KINDS,
+	type WorkflowAskData,
 	type WorkflowFinishedData,
 	type WorkflowInfo,
 	type WorkflowLogData,
@@ -40,6 +46,68 @@ export const WorkflowRollback = defineEntry<WorkflowRollbackData>(ENTRY_KINDS.wo
 export const WorkflowFinished = defineEntry<WorkflowFinishedData & { result?: JsonValue }>(
 	ENTRY_KINDS.workflowFinished,
 );
+export const WorkflowAsk = defineEntry<WorkflowAskData>(ENTRY_KINDS.workflowAsk);
+
+/** Answers to workflow questions in a session, by `<runId>:<key>`. First answer wins. */
+export const AnswersDoc = defineDoc<{ answers: Record<string, string> }>({
+	kind: "tiny.workflow.answers",
+	version: 1,
+	scope: "conversation",
+	history: "latest",
+	fork: "initial",
+	initial: () => ({ answers: {} }),
+	checkpointWhen: () => false,
+});
+
+/** Per run: the question task created for each `ask` key, so a woken run can tell "answered" from "expired". */
+const QuestionsDoc = defineDoc<{ questions: Record<string, number> }>({
+	kind: "tiny.workflow.questions",
+	version: 1,
+	scope: "task",
+	initial: () => ({ questions: {} }),
+	checkpointWhen: () => false,
+});
+
+/** Longest single sleep; a question without a deadline sleeps again after it. Keeps timers well inside 2^31 ms. */
+const MAX_SLEEP_MS = 7 * 24 * 60 * 60 * 1000;
+
+type QuestionInput = { runId: number; key: string; deadline: number | null };
+type QuestionState = { phase: "wait" } | { phase: "check" };
+
+/**
+ * Holds a run's place while it waits for an answer: it only sleeps. Ending it early (abort) is how an answer, or a
+ * Stop, wakes the run; ending on its own means the deadline passed.
+ */
+export const QuestionTask = defineTask<QuestionInput, QuestionState, { expired: true }>({
+	name: "tiny.workflow.question",
+	version: 1,
+	initial: () => ({ phase: "wait" }),
+	phases: {
+		wait: (task, runtime, context) =>
+			runtime.sleepUntil(
+				Math.min(task.input.deadline ?? Number.POSITIVE_INFINITY, runtime.now() + MAX_SLEEP_MS),
+				{ phase: "check" },
+				context,
+			),
+		check: async (task, runtime, context) => {
+			const expired = task.input.deadline !== null && runtime.now() >= task.input.deadline;
+			await runtime.commit(
+				() =>
+					expired
+						? { status: "terminal", outcome: { status: "completed", result: { expired: true } } }
+						: { status: "running", checkpoint: { phase: "wait" } },
+				context,
+			);
+		},
+	},
+	abort: (_task, runtime, context) =>
+		runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
+});
+
+export type QuestionHooks = {
+	/** A run started (or stopped) waiting for an answer. */
+	waiting(sessionId: number, runId: number, key: string, open: boolean): void;
+};
 
 type RunInput = { name: string; input: JsonValue };
 type RunState = { phase: "run" } | { phase: "rollback"; error: string };
@@ -149,6 +217,16 @@ class ReplayStop extends Error {
 	}
 }
 
+/** Thrown by `ask()` to park the run until the question is answered. */
+class AskPark extends Error {
+	constructor(
+		readonly ask: { key: string; question: string; choices?: string[]; placeholder?: string; deadline: number | null },
+		readonly questionTaskId: number | undefined,
+	) {
+		super(`waiting for an answer to "${ask.question}"`);
+	}
+}
+
 type Finished = { name: string; value: JsonValue; undo: (value: JsonValue) => Promise<void> | void };
 
 /**
@@ -161,10 +239,11 @@ function createContext(
 	context: Context,
 	cwd: string | undefined,
 	mode: { replay: false } | { replay: true; finished: Finished[] },
+	hooks: QuestionHooks,
 ): WorkflowContext<unknown> {
 	const runId = Number(task.id);
 	const used = new Set<string>();
-	const counters = { agent: 0, exec: 0 };
+	const counters = { agent: 0, exec: 0, ask: 0 };
 	let stopped = false;
 
 	const step = async <T extends JsonValue>(
@@ -256,6 +335,55 @@ function createContext(
 				undo ? { undo } : undefined,
 			) as unknown as Promise<ExecResult>;
 		},
+		async ask(question: string, options?: AskOptions): Promise<string> {
+			const key = options?.key ?? `ask-${++counters.ask}`;
+			if (used.has(`ask:${key}`))
+				throw new Error(`Workflow question "${key}" asked twice in one run; keys must be unique`);
+			used.add(`ask:${key}`);
+			if (mode.replay && stopped) throw new ReplayStop();
+			const memoKey = `answer:${key}`;
+			const stored = await runtime.memo<{ value: string }>(memoKey, context);
+			if (stored !== undefined) return stored.value;
+			if (mode.replay) {
+				stopped = true;
+				throw new ReplayStop();
+			}
+			const answers = await runtime.snapshot(AnswersDoc, runtime.conversationId, context);
+			const answer = answers?.answers[`${runId}:${key}`];
+			if (answer !== undefined) {
+				const kept = await runtime.memo<{ value: string }>(memoKey, { value: answer }, context);
+				await stepEntry(
+					runtime,
+					{ runId, step: key, title: question, status: "done", summary: `→ ${kept.value}` },
+					context,
+				);
+				hooks.waiting(Number(runtime.conversationId), runId, key, false);
+				return kept.value;
+			}
+			const questions = await runtime.snapshot(QuestionsDoc, task.id, context);
+			const questionTaskId = questions?.questions[key];
+			if (questionTaskId !== undefined) {
+				const record = await runtime.getTask(questionTaskId as never, context);
+				if (record?.state.status === "terminal") {
+					// The question ended without an answer: its deadline passed.
+					hooks.waiting(Number(runtime.conversationId), runId, key, false);
+					await stepEntry(
+						runtime,
+						{ runId, step: key, title: question, status: "failed", summary: "no answer in time" },
+						context,
+					);
+					throw new Error(`No answer to "${question}" in time`);
+				}
+			}
+			const deadline =
+				options?.timeoutMs === undefined
+					? null
+					: await runtime.memo<number>(`deadline:${key}`, runtime.now() + options.timeoutMs, context);
+			throw new AskPark(
+				{ key, question, choices: options?.choices, placeholder: options?.placeholder, deadline },
+				questionTaskId,
+			);
+		},
 		async log(text, level = "info") {
 			if (mode.replay) return;
 			await appendEntry(
@@ -277,11 +405,12 @@ async function rollback(
 	runtime: Runtime,
 	context: Context,
 	cwd: string | undefined,
+	hooks: QuestionHooks,
 ): Promise<{ undone: string[]; failures: string[] }> {
 	if (!def) return { undone: [], failures: ["the workflow is no longer installed, so its steps cannot be undone"] };
 	const finished: Finished[] = [];
 	try {
-		await def.run(createContext(task, runtime, context, cwd, { replay: true, finished }));
+		await def.run(createContext(task, runtime, context, cwd, { replay: true, finished }, hooks));
 	} catch {
 		// ReplayStop at the step that never finished, or the run's own error: either way `finished` is complete.
 	}
@@ -314,7 +443,13 @@ type Outcome =
 	| { status: "failed"; error: string; rolledBack?: string[] }
 	| { status: "aborted"; rolledBack?: string[] };
 
-export function createWorkflowTask(catalog: WorkflowCatalog, cwdOf: (sessionId: number) => string | undefined) {
+const NO_HOOKS: QuestionHooks = { waiting: () => {} };
+
+export function createWorkflowTask(
+	catalog: WorkflowCatalog,
+	cwdOf: (sessionId: number) => string | undefined,
+	hooks: QuestionHooks = NO_HOOKS,
+) {
 	const finish = async (task: Task, runtime: Runtime, context: Context, outcome: Outcome) => {
 		const data: WorkflowFinishedData = {
 			runId: Number(task.id),
@@ -336,6 +471,42 @@ export function createWorkflowTask(catalog: WorkflowCatalog, cwdOf: (sessionId: 
 		}, context);
 	};
 
+	/** Wait for an answer: create the question task (once per key) and wait on it, holding no process. */
+	const park = async (task: Task, runtime: Runtime, context: Context, parked: AskPark) => {
+		const runId = Number(task.id);
+		await runtime.commit(async (tx) => {
+			let questionTaskId = parked.questionTaskId;
+			if (questionTaskId === undefined) {
+				const { key, question, choices, placeholder, deadline } = parked.ask;
+				questionTaskId = Number(
+					await tx.createTask(QuestionTask, { runId, key, deadline }, { ownership: { kind: "task", taskId: task.id } }),
+				);
+				(await tx.doc(QuestionsDoc, task.id)).questions[key] = questionTaskId;
+				const ask: WorkflowAskData = {
+					runId,
+					key,
+					question,
+					...(choices?.length ? { choices } : {}),
+					...(placeholder ? { placeholder } : {}),
+					...(deadline !== null ? { deadline } : {}),
+				};
+				await tx.appendEntry(runtime.conversationId, { kind: WorkflowAsk.kind, data: ask as unknown as JsonValue });
+				await tx.appendEntry(runtime.conversationId, {
+					kind: WorkflowStep.kind,
+					data: {
+						runId,
+						step: key,
+						title: question,
+						status: "waiting",
+					} satisfies WorkflowStepData as unknown as JsonValue,
+				});
+			}
+			// One task to wait on, so "allSettled" wakes the run as soon as the question ends.
+			return { status: "waiting", on: [questionTaskId as never], policy: "allSettled", checkpoint: { phase: "run" } };
+		}, context);
+		hooks.waiting(Number(runtime.conversationId), runId, parked.ask.key, true);
+	};
+
 	const revert = async (task: Task, runtime: Runtime, context: Context, reason: string) => {
 		const def = catalog.get(task.input.name);
 		await appendEntry(
@@ -343,10 +514,10 @@ export function createWorkflowTask(catalog: WorkflowCatalog, cwdOf: (sessionId: 
 			{ kind: WorkflowRollback.kind, data: { runId: Number(task.id), reason } satisfies WorkflowRollbackData },
 			context,
 		);
-		return rollback(def, task, runtime, context, cwdOf(Number(runtime.conversationId)));
+		return rollback(def, task, runtime, context, cwdOf(Number(runtime.conversationId)), hooks);
 	};
 
-	return defineTask<RunInput, RunState, JsonValue>({
+	const workflowTask = defineTask<RunInput, RunState, JsonValue>({
 		name: "tiny.workflow",
 		version: 1,
 		initial: () => ({ phase: "run" }),
@@ -360,13 +531,24 @@ export function createWorkflowTask(catalog: WorkflowCatalog, cwdOf: (sessionId: 
 					});
 					return;
 				}
-				const ctx = createContext(task, runtime, context, cwdOf(Number(runtime.conversationId)), { replay: false });
+				const ctx = createContext(
+					task,
+					runtime,
+					context,
+					cwdOf(Number(runtime.conversationId)),
+					{ replay: false },
+					hooks,
+				);
 				let result: JsonValue;
 				try {
 					const value = await def.run(ctx);
 					result = value === undefined ? null : (JSON.parse(JSON.stringify(value)) as JsonValue);
 				} catch (error) {
 					if (runtime.signal.aborted) throw error; // the abort handler rolls back and records the outcome
+					if (error instanceof AskPark) {
+						await park(task, runtime, context, error);
+						return;
+					}
 					// Durably move to the rollback phase, so a crash during it resumes the rollback.
 					await runtime.commit(
 						() => ({ status: "running", checkpoint: { phase: "rollback", error: messageOf(error) } }),
@@ -388,10 +570,11 @@ export function createWorkflowTask(catalog: WorkflowCatalog, cwdOf: (sessionId: 
 			await finish(task, runtime, context, { status: "aborted", rolledBack: undone });
 		},
 	});
+	return workflowTask;
 }
 
 export type WorkflowTaskDef = ReturnType<typeof createWorkflowTask>;
 
 export function createWorkflowExtension(task: WorkflowTaskDef): Extension {
-	return defineExtension({ name: "tiny-workflows", tasks: [task] });
+	return defineExtension({ name: "tiny-workflows", tasks: [task, QuestionTask] });
 }

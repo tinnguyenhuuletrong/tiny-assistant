@@ -140,6 +140,13 @@ export function startServer(service: AssistantService): Server<SocketData> {
 		},
 		"/api/workflows": { GET: async () => json(service.workflows.list()) },
 		"/api/workflows/run": { POST: async (request) => json(await service.runWorkflow(await body(request)), 202) },
+		"/api/workflows/:runId/answer": {
+			POST: async (request, _url, [runId]) => {
+				const input = await body<{ sessionId: number; key: string; value: string }>(request);
+				await service.answerWorkflow({ ...input, runId: intParam(runId, "runId") });
+				return json({ ok: true });
+			},
+		},
 		"/api/search": {
 			GET: async (_request, url) => json(service.db.search((url.searchParams.get("q") ?? "").slice(0, 200))),
 		},
@@ -154,7 +161,7 @@ export function startServer(service: AssistantService): Server<SocketData> {
 	};
 
 	const routes = Object.entries(handlers).map(([pattern, methods]) => ({
-		regex: new RegExp(`^${pattern.replace(/:[a-z]+/g, "([^/]+)")}$`),
+		regex: new RegExp(`^${pattern.replace(/:[A-Za-z]+/g, "([^/]+)")}$`),
 		methods,
 	}));
 

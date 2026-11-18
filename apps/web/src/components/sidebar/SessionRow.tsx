@@ -65,10 +65,20 @@ export const SessionRow = memo(function SessionRow({ session, active, onNavigate
 					<span className="truncate">{title}</span>
 				</a>
 			)}
-			{session.busy && !renaming && (
-				<span className="flex shrink-0 items-center px-1" title="Working">
-					<Spinner className="size-3.5 text-accent" />
+			{session.waitingForInput && !renaming ? (
+				<span
+					className="mr-0.5 shrink-0 rounded-full bg-accent px-1.5 py-px font-medium text-[10px] text-accent-fg"
+					title="A workflow is waiting for your answer"
+				>
+					needs you
 				</span>
+			) : (
+				session.busy &&
+				!renaming && (
+					<span className="flex shrink-0 items-center px-1" title="Working">
+						<Spinner className="size-3.5 text-accent" />
+					</span>
+				)
 			)}
 			{!renaming && (
 				<button

@@ -66,6 +66,20 @@ export type WorkflowContext<I> = {
 	): Promise<ExecResult>;
 	/** Append a log line to the session transcript. */
 	log(text: string, level?: "info" | "warn" | "error"): Promise<void>;
+	/**
+	 * Ask the user and wait for the answer (human in the loop). The question appears in every client; the run holds no
+	 * process while it waits, survives restarts, and continues with the answer. With `choices`, the answer is one of
+	 * them. With `timeoutMs`, no answer in time fails the run (and rolls back its finished steps). Like steps, keys must
+	 * be unique per run (default `ask-1`, `ask-2`, ...). Do not catch errors around `ask`: it parks the run by throwing.
+	 */
+	ask(question: string, options?: AskOptions): Promise<string>;
+};
+
+export type AskOptions = {
+	key?: string;
+	choices?: string[];
+	placeholder?: string;
+	timeoutMs?: number;
 };
 
 export type WorkflowDefinition<I = unknown> = {

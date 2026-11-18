@@ -385,6 +385,11 @@ export class AssistantClient {
 		return this.#post("/api/workflows/run", input);
 	}
 
+	/** Answer a question a workflow asked; the run continues with it. */
+	answerWorkflow(input: { sessionId: number; runId: number; key: string; value: string }): Promise<void> {
+		return this.#post(`/api/workflows/${input.runId}/answer`, input);
+	}
+
 	search(query: string): Promise<SearchHit[]> {
 		return this.#get(`/api/search?q=${encodeURIComponent(query)}`);
 	}
