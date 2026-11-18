@@ -22,6 +22,8 @@ sent from the phone appears in the terminal. ([MP4](docs/media/sync-demo.mp4))
   [pi-claude-code](https://github.com/earendil-works/pi-claude-code), so it uses your Pro/Max plan. Other providers
   (OpenAI, Anthropic API, Google, OpenRouter, ...) plug in through pi-ai.
 - **Code-driven tools and workflows.** Drop TypeScript files into `assistant/`; the daemon hot-reloads them.
+- **Workflows that can undo and ask.** Steps are checkpointed; give them an `undo` and a failed or stopped run reverts
+  itself (a saga). `ctx.ask()` pauses a run until you answer, for as long as it takes. Every run is drawn live.
 - **Sessions and projects.** Start a chat, point it at a project folder, switch between sessions, search everything.
 - **One API.** REST + one WebSocket. The web app and the TUI use the same typed client (`@tiny/core`).
 - **Logs you can analyze.** Transcripts, per-run tokens, cost, duration, and tool calls live in one SQLite file.
@@ -73,8 +75,9 @@ curl -fsSL https://<mac-mini>.<tailnet>.ts.net/tui.js -o tiny.js
 bun tiny.js https://<mac-mini>.<tailnet>.ts.net
 ```
 
-In the TUI: type to chat, `/` for commands (`/new`, `/sessions`, `/project`, `/model`, `/run`, `/compact`, ...),
-`ctrl+p` switches sessions, `ctrl+o` expands tool output and thinking, `esc` stops a run.
+In the TUI: type to chat, `/` for commands (`/new`, `/sessions`, `/project`, `/model`, `/run`, `/answer`, `/compact`,
+...), `ctrl+p` switches sessions, `ctrl+o` expands tool output and thinking, `esc` stops a run. When a workflow in any
+session asks you something, the TUI rings, the footer shows `? N questions waiting for you`, and `ctrl+g` jumps there.
 
 ## Tools
 
@@ -156,12 +159,16 @@ await ctx.step("place order", () => placeOrder());
 
 - The move into the rollback is checkpointed, and so is each undo: a crash mid-rollback resumes it, and no step is
   undone twice.
+- Stop while a step is running lets it finish, then undoes it too. If the daemon crashes in the middle of a step, nobody
+  can know whether it took effect, so the rollback says so ("check it by hand") instead of guessing. Make external
+  calls idempotent (`ctx.runId` makes a good key) and undos safe to repeat.
 - To find what to undo, the rollback replays `run()` with the stored step results, so keep `run()` deterministic
   (branch on step results, not on the clock).
 - `ctx.exec(command, { undo: "shell command" })` is the same for shell steps; `check: true` fails the step when the
-  command exits non-zero.
-  [`safe-change`](assistant/workflows/safe-change.ts) uses it: the agent changes your project on a throwaway git
-  branch, and if your tests fail the branch is deleted and you are back where you started.
+  command exits non-zero. Build commands from input with `shellQuote()` (from `@tiny/core/define`): text inside
+  double quotes still runs `$(...)` and backticks.
+  [`safe-change`](assistant/workflows/safe-change.ts) uses all of this: the agent changes your project on a throwaway
+  git branch, and if your tests fail the branch and everything the attempt created are removed.
 
 Every run is drawn live in the session: steps as they start and finish, and the rollback lane when a run reverts.
 ([MP4](docs/media/workflow-demo.mp4))
@@ -191,15 +198,27 @@ await ctx.step("pay", () => pay(amount));
 - [`release-notes`](assistant/workflows/release-notes.ts) loops on it: the agent drafts, you pick Publish, Revise
   (then say what to change), or Cancel.
 
-([MP4](docs/media/approval-demo.mp4))
+Below, the TUI starts `expense-approval` from one of its examples; the run waits, and the phone answers it. Both
+clients show the same run the whole time. ([MP4](docs/media/approval-sync.mp4))
 
-![An expense approval: the run reserves budget, waits for a person, and pays once approved](docs/media/approval-demo.gif)
+![The TUI starts an expense approval, the phone approves it, and both show the run complete](docs/media/approval-sync.gif)
 
 `WorkflowContext`: `input`, `runId`, `sessionId`, `cwd`, `signal`, `step(name, fn, { undo })`, `agent(prompt)`,
 `exec(command, { check, undo })`, `ask(question, { choices, timeoutMs })`, `log(text)`.
 
 Extra instructions for every session go in `assistant/SYSTEM.md`; a project's own `AGENTS.md` or `CLAUDE.md` is
 picked up automatically when a session works in that folder.
+
+### Bundled examples
+
+| Workflow                                                      | What it shows                                                         |
+| ------------------------------------------------------------- | --------------------------------------------------------------------- |
+| [`repo-review`](assistant/workflows/repo-review.ts)           | `exec` and `agent` steps: review uncommitted changes                  |
+| [`daily-brief`](assistant/workflows/daily-brief.ts)           | gather facts with steps, let the agent write the summary              |
+| [`checkout`](assistant/workflows/checkout.ts)                 | rollback: a declined card refunds the cards already charged           |
+| [`safe-change`](assistant/workflows/safe-change.ts)           | `exec` with `undo` and `check`: change code on a throwaway git branch |
+| [`expense-approval`](assistant/workflows/expense-approval.ts) | `ask` with choices and a timeout, no model needed                     |
+| [`release-notes`](assistant/workflows/release-notes.ts)       | a review loop: draft, ask, revise, publish                            |
 
 ## API
 
