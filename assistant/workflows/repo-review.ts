@@ -8,6 +8,10 @@ export default defineWorkflow({
 	name: "repo-review",
 	description: "Review uncommitted git changes in the project and suggest improvements",
 	input: obj({ focus: opt(str({ description: "What to focus on, e.g. 'security' or 'naming'" })) }),
+	examples: [
+		{ label: "General review", input: {} },
+		{ label: "Security pass", input: { focus: "security: injection, secrets, unsafe input handling" } },
+	],
 	async run(ctx) {
 		const status = await ctx.exec("git status --short && git diff --stat", { step: "git-status" });
 		if (status.exitCode !== 0) throw new Error(`Not a git repository?\n${status.output}`);

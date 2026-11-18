@@ -5,6 +5,10 @@ export default defineWorkflow({
 	name: "daily-brief",
 	description: "Summarize what changed in the project recently and propose today's priorities",
 	input: obj({ since: opt(str({ description: "git --since value, default '1 day ago'" })) }),
+	examples: [
+		{ label: "Since yesterday", input: {} },
+		{ label: "This week", input: { since: "1 week ago" } },
+	],
 	async run(ctx) {
 		const since = ctx.input.since ?? "1 day ago";
 		const log = await ctx.exec(`git log --since="${since.replace(/"/g, "")}" --oneline --no-merges | head -50`, {

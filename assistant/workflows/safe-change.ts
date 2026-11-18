@@ -15,6 +15,16 @@ export default defineWorkflow({
 		test: opt(str({ description: "Command that must succeed, default `bun test`" })),
 		keepBranch: opt(bool({ description: "Keep the branch on failure for inspection" })),
 	}),
+	examples: [
+		{
+			label: "Add a --version flag",
+			input: { task: "Add a --version flag to the CLI that prints the package version." },
+		},
+		{
+			label: "Fix failing tests",
+			input: { task: "Run the tests, find why they fail, and fix the code (not the tests).", test: "bun test" },
+		},
+	],
 	async run(ctx) {
 		// Without a project folder, commands would run in the daemon's own directory.
 		if (!ctx.cwd) throw new Error("Run safe-change in a project: it needs the project's git repository.");

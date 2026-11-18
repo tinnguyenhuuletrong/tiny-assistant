@@ -45,6 +45,13 @@ export default defineWorkflow({
 		cards: arr(str(), { minItems: 1, description: "Card ids to split the amount across" }),
 		decline: opt(str({ description: "Simulate a declined card (one of the card ids)" })),
 	}),
+	examples: [
+		{ label: "All cards go through", input: { amount: 90, cards: ["visa-4242", "mc-4444", "amex-0005"] } },
+		{
+			label: "One card is declined (rollback)",
+			input: { amount: 120, cards: ["visa-4242", "mc-4444", "jcb-3530", "amex-0005"], decline: "amex-0005" },
+		},
+	],
 	async run(ctx) {
 		const { amount, cards, decline } = ctx.input;
 		const share = Math.round((amount / cards.length) * 100) / 100;

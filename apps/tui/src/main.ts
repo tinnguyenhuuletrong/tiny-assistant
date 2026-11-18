@@ -596,15 +596,30 @@ async function command(line: string): Promise<void> {
 				});
 				openSession(result.sessionId);
 			};
+			// Without JSON, offer the workflow's own examples (declared in its definition file).
+			const chooseInput = (wfName: string) => {
+				const examples = client.workflows().find((wf) => wf.name === wfName)?.examples ?? [];
+				if (examples.length === 0) return start(wfName, {});
+				pick(
+					examples.map((example, index) => ({
+						value: String(index),
+						label: example.label,
+						description: JSON.stringify(example.input),
+					})),
+					(item) => start(wfName, examples[Number(item.value)]!.input),
+					`${wfName}: start from an example (or type /run ${wfName} {json})`,
+				);
+			};
 			if (!workflow) {
 				pick(
 					client.workflows().map((wf) => ({ value: wf.name, label: wf.name, description: wf.description })),
-					(item) => void start(item.value, {}).catch((error) => notify(String(error), "error")),
+					(item) => chooseInput(item.value),
 					"Workflows",
 				);
 				return;
 			}
-			await start(workflow, json.length ? JSON.parse(json.join(" ")) : {});
+			if (json.length === 0) await chooseInput(workflow);
+			else await start(workflow, JSON.parse(json.join(" ")));
 			return;
 		}
 		case "rename":

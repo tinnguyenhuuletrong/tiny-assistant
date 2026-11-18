@@ -74,13 +74,18 @@ export type WorkflowDefinition<I = unknown> = {
 	readonly description: string;
 	/** JSON Schema of the input (pi-schema builders), shown as a form in clients and validated before a run starts. */
 	readonly input?: Schema<I>;
+	/** Ready-made inputs, shown as one-tap choices in the run dialog and `/run`. Checked against `input` at load. */
+	readonly examples?: readonly WorkflowExample<I>[];
 	run(ctx: WorkflowContext<I>): Promise<unknown>;
 };
+
+export type WorkflowExample<I> = { readonly label: string; readonly input: I };
 
 export function defineWorkflow<S extends Schema<unknown>>(definition: {
 	name: string;
 	description: string;
 	input: S;
+	examples?: readonly WorkflowExample<Static<S>>[];
 	run(ctx: WorkflowContext<Static<S>>): Promise<unknown>;
 }): WorkflowDefinition<Static<S>>;
 export function defineWorkflow(definition: {
@@ -92,6 +97,7 @@ export function defineWorkflow(definition: {
 	name: string;
 	description: string;
 	input?: Schema<unknown>;
+	examples?: readonly WorkflowExample<unknown>[];
 	run(ctx: WorkflowContext<unknown>): Promise<unknown>;
 }): WorkflowDefinition<unknown> {
 	if (!/^[a-z0-9][a-z0-9_-]*$/i.test(definition.name)) {

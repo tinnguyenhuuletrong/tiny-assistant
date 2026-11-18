@@ -127,6 +127,17 @@ export default defineWorkflow({
 Run it from the web app ("Run workflow"), the TUI (`/run repo-review {"focus":"security"}`), or the API
 (`POST /api/workflows/run`). Stopping the session stops the run.
 
+Give a workflow `examples` so people know what to type. The web app shows them as one-tap choices above a form built
+from the input schema (with each field's `description` as its hint), and `/run <name>` in the TUI offers them as a
+list. The daemon checks every example against the schema when it loads the file:
+
+```ts
+examples: [
+	{ label: "General review", input: {} },
+	{ label: "Security pass", input: { focus: "security: injection, secrets, unsafe input handling" } },
+],
+```
+
 ### Rollback (sagas)
 
 Give a step an `undo` and the run can revert itself. If a later step fails, or you press Stop, the finished steps are

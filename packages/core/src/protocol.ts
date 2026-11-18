@@ -75,6 +75,8 @@ export type WorkflowInfo = {
 	description: string;
 	/** JSON Schema of the input, when the workflow declares one. */
 	input?: unknown;
+	/** Ready-made inputs to start from, shown as one-tap choices in the clients. */
+	examples?: { label: string; input: unknown }[];
 	source: string;
 };
 

@@ -52,6 +52,15 @@ export class WorkflowCatalog {
 
 	set(def: WorkflowDefinition<unknown>, source: string): void {
 		this.#defs.set(def.name, { def, source });
+		for (const example of def.examples ?? []) {
+			try {
+				this.validate(def.name, example.input);
+			} catch (error) {
+				console.warn(
+					`[assistant] ${source}: example "${example.label}" does not match the input schema: ${messageOf(error)}`,
+				);
+			}
+		}
 	}
 
 	removeSource(source: string): void {
@@ -68,6 +77,7 @@ export class WorkflowCatalog {
 				name: def.name,
 				description: def.description,
 				input: def.input === undefined ? undefined : JSON.parse(JSON.stringify(def.input)),
+				...(def.examples?.length ? { examples: JSON.parse(JSON.stringify(def.examples)) } : {}),
 				source,
 			}))
 			.sort((a, b) => a.name.localeCompare(b.name));
