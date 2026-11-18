@@ -412,9 +412,51 @@ function render(): void {
 
 	const usage = view ? sessionUsage(view.value.docs) : undefined;
 	const cost = usage && usage.cost > 0 ? ` · $${usage.cost.toFixed(3)}` : "";
-	footer.setText(c.dim(`/ commands · ctrl+p sessions · ctrl+n new · ctrl+o expand · ctrl+c quit${cost}`));
+	const waiting = waitingSessions().filter((s) => s.id !== ui.sessionId);
+	const elsewhere =
+		waiting.length > 0
+			? `${c.inverse(c.accent(` ? ${waiting.length} question${waiting.length === 1 ? "" : "s"} waiting for you `))} ${c.dim("ctrl+g to answer · ")}`
+			: "";
+	const hints = elsewhere
+		? "/ commands · ctrl+p sessions"
+		: "/ commands · ctrl+p sessions · ctrl+n new · ctrl+o expand · ctrl+c quit";
+	footer.setText(
+		truncateToWidth(`${elsewhere}${c.dim(`${hints}${cost}`)}`, Math.max(20, (process.stdout.columns ?? 80) - 2)),
+	);
 	tui.requestRender();
 }
+
+/** Sessions with a workflow waiting for an answer, oldest question first-ish (most recently updated last). */
+function waitingSessions(): SessionInfo[] {
+	return sessions()
+		.filter((session) => session.waitingForInput)
+		.sort((a, b) => a.updatedAt - b.updatedAt);
+}
+
+/** Open the next session that is waiting for an answer (cycling past the current one). */
+function goToWaiting(): boolean {
+	const waiting = waitingSessions();
+	if (waiting.length === 0) return false;
+	const index = waiting.findIndex((session) => session.id === ui.sessionId);
+	openSession(waiting[(index + 1) % waiting.length]!.id);
+	return true;
+}
+
+// Ring the bell and say where, when a question shows up in a session (on this or another screen).
+let knownWaiting = new Set(waitingSessions().map((session) => session.id));
+client.subscribe(() => {
+	const now = waitingSessions();
+	const fresh = now.filter((session) => !knownWaiting.has(session.id));
+	knownWaiting = new Set(now.map((session) => session.id));
+	if (fresh.length === 0) return;
+	process.stdout.write("\x07");
+	const here = fresh.find((session) => session.id === ui.sessionId);
+	notify(
+		here
+			? "A workflow is asking you something: /answer"
+			: `"${fresh[0]!.title}" is waiting for your answer: ctrl+g to go there`,
+	);
+});
 
 client.subscribe(render);
 client.onError((message) => notify(message, "error"));
@@ -508,10 +550,15 @@ function pick(items: SelectItem[], onSelect: (item: SelectItem) => void | Promis
 }
 
 function pickSession(): void {
-	const items = sessions().map((session) => ({
+	const ordered = [...waitingSessions(), ...sessions().filter((session) => !session.waitingForInput)];
+	const items = ordered.map((session) => ({
 		value: String(session.id),
-		label: `${session.busy ? "● " : ""}${session.pinned ? "★ " : ""}${session.title}`,
-		description: [projectName(session.projectId), new Date(session.updatedAt).toLocaleString()]
+		label: `${session.waitingForInput ? "? " : session.busy ? "● " : ""}${session.pinned ? "★ " : ""}${session.title}`,
+		description: [
+			session.waitingForInput ? "needs your answer" : null,
+			projectName(session.projectId),
+			new Date(session.updatedAt).toLocaleString(),
+		]
 			.filter(Boolean)
 			.join(" · "),
 	}));
@@ -634,7 +681,11 @@ async function command(line: string): Promise<void> {
 			return;
 		}
 		case "answer": {
-			const sessionId = needSession();
+			if (id === null) {
+				if (!goToWaiting()) notify("No workflow is waiting for an answer");
+				return;
+			}
+			const sessionId = id;
 			const view = client.views.get(sessionId);
 			const pending = view
 				? buildDisplay(client.entries(sessionId), view.value.docs)
@@ -642,7 +693,8 @@ async function command(line: string): Promise<void> {
 						.at(-1)
 				: undefined;
 			if (!pending) {
-				notify("No workflow is waiting for an answer here");
+				if (goToWaiting()) notify("Opened the session that is waiting: /answer again to reply");
+				else notify("No workflow is waiting for an answer");
 				return;
 			}
 			const send = async (value: string) => {
@@ -763,6 +815,10 @@ tui.addInputListener((data) => {
 	}
 	if (matchesKey(data, "ctrl+p")) {
 		pickSession();
+		return { consume: true };
+	}
+	if (matchesKey(data, "ctrl+g")) {
+		if (!goToWaiting()) notify("No workflow is waiting for an answer");
 		return { consume: true };
 	}
 	if (matchesKey(data, "ctrl+n")) {

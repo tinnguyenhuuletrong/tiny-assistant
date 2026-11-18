@@ -28,6 +28,7 @@ export default {
 	description: "test",
 	async run(ctx) {
 		await ctx.step("reserve", () => { log("reserve"); return 1; }, { undo: () => log("release") });
+		await ctx.log("reserved");
 		const answer = await ctx.ask("Approve the expense?", ${options});
 		if (answer !== "Approve") throw new Error("Rejected");
 		await ctx.step("pay", () => { log("pay"); return 2; });
@@ -93,6 +94,9 @@ describe("human in the loop", () => {
 		expect(done.data).toMatchObject({ status: "completed", result: "paid" });
 		expect(await lines(log)).toEqual(["reserve", "pay"]); // reserve ran once, before and after the wait
 		expect(service.session(sessionId)?.waitingForInput).toBe(false);
+		// The log line before the question is not repeated when the run replays after the answer.
+		const { items } = await service.entries(sessionId, undefined, 200);
+		expect(items.filter((entry) => entry.kind === "tiny.workflow.log")).toHaveLength(1);
 	});
 
 	test("the question survives a restart", async () => {

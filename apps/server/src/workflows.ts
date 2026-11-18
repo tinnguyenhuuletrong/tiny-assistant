@@ -243,7 +243,7 @@ function createContext(
 ): WorkflowContext<unknown> {
 	const runId = Number(task.id);
 	const used = new Set<string>();
-	const counters = { agent: 0, exec: 0, ask: 0 };
+	const counters = { agent: 0, exec: 0, ask: 0, log: 0 };
 	let stopped = false;
 
 	const step = async <T extends JsonValue>(
@@ -386,11 +386,15 @@ function createContext(
 		},
 		async log(text, level = "info") {
 			if (mode.replay) return;
+			// run() replays from the top after a wake or restart: a log line written before then is not written again.
+			const key = `log:${++counters.log}`;
+			if ((await runtime.memo<boolean>(key, context)) !== undefined) return;
 			await appendEntry(
 				runtime,
 				{ kind: WorkflowLog.kind, data: { runId, text, level } satisfies WorkflowLogData },
 				context,
 			);
+			await runtime.memo(key, true, context);
 		},
 	};
 }
