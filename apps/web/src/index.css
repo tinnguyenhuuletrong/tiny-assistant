@@ -226,6 +226,9 @@
 		padding: 0.4em 0.75em;
 		text-align: left;
 		vertical-align: top;
+		/* Keep words whole: on a phone a wide table scrolls inside .table-wrap instead of splitting words. */
+		overflow-wrap: break-word;
+		min-width: 7rem;
 	}
 	.markdown th {
 		background: var(--surface-2);

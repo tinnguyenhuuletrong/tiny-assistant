@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install dev start tui build bundle check lint format fix typecheck test tailscale-serve tailscale-off service-install service-uninstall service-status logs
+.PHONY: help install dev start tui build bundle check ci lint format fix typecheck test tailscale-serve tailscale-off service-install service-uninstall service-status logs
 
 help: ## show targets
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -22,16 +22,20 @@ build: ## build the web app
 bundle: ## single-file TUI in dist/tiny-tui.js
 	bun run tui:bundle
 
-check: lint typecheck test ## lint + typecheck + tests (run before every commit)
+check: format lint typecheck test ## format, then lint + typecheck + tests (run before every commit)
 
-lint: ## biome lint + format check
+ci: ## like check, but only verifies: fails on unformatted code instead of fixing it
+	bunx biome ci .
+	bun run typecheck
+	bun test
+
+lint: ## biome lint (also fails on unformatted code)
 	bunx biome check .
 
-format: ## biome format
-	bunx biome format --write .
-
-fix: ## biome safe fixes + format
+format: ## biome: format, sort imports, apply safe fixes
 	bunx biome check --write .
+
+fix: format ## alias for format
 
 typecheck: ## tsc in every package
 	bun run typecheck

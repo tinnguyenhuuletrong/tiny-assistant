@@ -1,8 +1,8 @@
 # tiny-assistant: notes for coding agents
 
 - **Bun only** (`bun install`, `bun test`, `bun run`). Never npm/pnpm/yarn.
-- `make check` must pass before committing: Biome lint/format, `tsc` in every package, `bun test`.
-  `make fix` applies Biome's safe fixes.
+- `make check` must pass before committing: it formats (Biome), then lints, runs `tsc` in every package, and
+  `bun test`. `make ci` runs the same checks without changing files.
 - Layout:
   - `packages/core`: browser-safe protocol types (`protocol.ts`), the display model (`display.ts`), the one API client
     (`client.ts`), and the tool/workflow authoring API (`define.ts`, server-side only).

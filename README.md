@@ -4,6 +4,25 @@ A tiny, self-hosted personal AI assistant. One daemon on your own machine (a Mac
 [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable); a rich web app (for your phone, over
 Tailscale) and a Claude Code-style terminal client connect to it and stay in sync.
 
+![The web app: a coding session in a project, with tool calls, a diff, and per-message cost](docs/screenshots/desktop-light.png)
+
+<table>
+  <tr>
+    <td width="33%"><img src="docs/screenshots/mobile-chat.png" alt="Chat on a phone"></td>
+    <td width="33%"><img src="docs/screenshots/mobile-sidebar.png" alt="Sessions grouped by project"></td>
+    <td width="33%"><img src="docs/screenshots/mobile-dark.png" alt="Dark mode, a wide table scrolls in place"></td>
+  </tr>
+  <tr>
+    <td align="center">On your phone, over Tailscale</td>
+    <td align="center">Sessions grouped by project</td>
+    <td align="center">Dark mode follows the system</td>
+  </tr>
+</table>
+
+![The terminal client, following the same session](docs/screenshots/tui.png)
+
+## Features
+
 - **Durable by default.** Every model turn, tool call, and workflow step is committed to SQLite before anything is
   shown. Restart the daemon mid-answer and the work picks up where it stopped.
 - **Your Claude subscription.** Models run through the official `claude` CLI via
@@ -13,6 +32,21 @@ Tailscale) and a Claude Code-style terminal client connect to it and stay in syn
 - **Sessions and projects.** Start a chat, point it at a project folder, switch between sessions, search everything.
 - **One API.** REST + one WebSocket. The web app and the TUI use the same typed client (`@tiny/core`).
 - **Logs you can analyze.** Transcripts, per-run tokens, cost, duration, and tool calls live in one SQLite file.
+
+<details>
+<summary>More screenshots</summary>
+
+Dark mode on the desktop:
+
+![Dark mode](docs/screenshots/desktop-dark.png)
+
+Full-text search across every session (⌘K):
+
+![Search](docs/screenshots/search.png)
+
+</details>
+
+## How it fits together
 
 ```
  phone / laptop browser ─┐                       ┌─ pi-durable Harness ── claude -p (your subscription)
@@ -111,7 +145,9 @@ export default defineWorkflow({
 ```
 
 Run it from the web app ("Run workflow"), the TUI (`/run repo-review {"focus":"security"}`), or the API
-(`POST /api/workflows/run`). Stopping the session stops the run.
+(`POST /api/workflows/run`). Stopping the session stops the run. Each step shows up in the session as it finishes:
+
+![A repo-review workflow run: the agent's review, then the step timeline](docs/screenshots/workflow.png)
 
 `WorkflowContext`: `input`, `sessionId`, `cwd`, `signal`, `step(name, fn)`, `agent(prompt)`, `exec(command)`,
 `log(text)`.
@@ -161,7 +197,8 @@ sqlite3 ~/.tiny-assistant/assistant.sqlite \
 
 ```sh
 make dev     # daemon with --watch + Vite dev server on :5173 (proxies /api and /ws)
-make check   # biome lint + typecheck + tests
+make check   # format, then lint + typecheck + tests
+make ci      # the same, verify-only (for CI)
 ```
 
 Layout: `packages/core` (protocol, display model, client, authoring API) · `apps/server` (daemon) · `apps/web`
