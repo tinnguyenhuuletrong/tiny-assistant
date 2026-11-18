@@ -4,22 +4,15 @@ A tiny, self-hosted personal AI assistant. One daemon on your own machine (a Mac
 [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable); a rich web app (for your phone, over
 Tailscale) and a Claude Code-style terminal client connect to it and stay in sync.
 
-![The web app: a coding session in a project, with tool calls, a diff, and per-message cost](docs/screenshots/desktop-light.png)
+**Ask from the web app.** A new chat in a project folder: the agent reads the code, edits it, runs it, and streams
+every step. ([MP4](docs/media/web-demo.mp4))
 
-<table>
-  <tr>
-    <td width="33%"><img src="docs/screenshots/mobile-chat.png" alt="Chat on a phone"></td>
-    <td width="33%"><img src="docs/screenshots/mobile-sidebar.png" alt="Sessions grouped by project"></td>
-    <td width="33%"><img src="docs/screenshots/mobile-dark.png" alt="Dark mode, a wide table scrolls in place"></td>
-  </tr>
-  <tr>
-    <td align="center">On your phone, over Tailscale</td>
-    <td align="center">Sessions grouped by project</td>
-    <td align="center">Dark mode follows the system</td>
-  </tr>
-</table>
+![Web app demo: a coding task in a project, streamed with its tool calls](docs/media/web-demo.gif)
 
-![The terminal client, following the same session](docs/screenshots/tui.png)
+**Same session, two clients.** A question typed in the terminal streams into the phone at the same time; a follow-up
+sent from the phone appears in the terminal. ([MP4](docs/media/sync-demo.mp4))
+
+![Sync demo: the TUI and the phone web app following one session](docs/media/sync-demo.gif)
 
 ## Features
 
@@ -32,19 +25,6 @@ Tailscale) and a Claude Code-style terminal client connect to it and stay in syn
 - **Sessions and projects.** Start a chat, point it at a project folder, switch between sessions, search everything.
 - **One API.** REST + one WebSocket. The web app and the TUI use the same typed client (`@tiny/core`).
 - **Logs you can analyze.** Transcripts, per-run tokens, cost, duration, and tool calls live in one SQLite file.
-
-<details>
-<summary>More screenshots</summary>
-
-Dark mode on the desktop:
-
-![Dark mode](docs/screenshots/desktop-dark.png)
-
-Full-text search across every session (⌘K):
-
-![Search](docs/screenshots/search.png)
-
-</details>
 
 ## How it fits together
 
@@ -145,9 +125,7 @@ export default defineWorkflow({
 ```
 
 Run it from the web app ("Run workflow"), the TUI (`/run repo-review {"focus":"security"}`), or the API
-(`POST /api/workflows/run`). Stopping the session stops the run. Each step shows up in the session as it finishes:
-
-![A repo-review workflow run: the agent's review, then the step timeline](docs/screenshots/workflow.png)
+(`POST /api/workflows/run`). Stopping the session stops the run. Each step shows up in the session as it finishes.
 
 `WorkflowContext`: `input`, `sessionId`, `cwd`, `signal`, `step(name, fn)`, `agent(prompt)`, `exec(command)`,
 `log(text)`.
