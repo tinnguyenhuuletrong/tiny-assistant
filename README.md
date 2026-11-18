@@ -65,7 +65,7 @@ Full-text search across every session (⌘K):
 ## Quick start
 
 ```sh
-git clone <this repo> tiny-assistant && cd tiny-assistant
+git clone https://github.com/tinnguyenhuuletrong/tiny-assistant.git && cd tiny-assistant
 make install
 make start            # builds the web app, starts the daemon on http://127.0.0.1:7777
 make tui              # in another terminal

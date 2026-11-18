@@ -158,7 +158,9 @@ export class AssistantService {
 			{
 				models,
 				registry,
-				identity: { attribution: { name: "tiny-assistant", url: "https://github.com/" } },
+				identity: {
+					attribution: { name: "tiny-assistant", url: "https://github.com/tinnguyenhuuletrong/tiny-assistant" },
+				},
 				env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? homedir() }),
 				settings: {
 					retry: { maxRetries: 3 },
