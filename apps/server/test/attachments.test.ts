@@ -3,10 +3,12 @@ import { BACKGROUND_CONTEXT as BACKGROUND } from "@earendil-works/chord/context"
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { AssistantClient, buildDisplay, USER_ENTRY_KIND } from "@tiny/core";
 import { AgentDoc } from "../src/agent.ts";
+import { pdfText } from "../src/attachments.ts";
 import type { Engine, TurnInput } from "../src/engines/types.ts";
 import { startServer } from "../src/server.ts";
 import type { AssistantService } from "../src/service.ts";
 import { type Fixture, fixture, until } from "./helpers.ts";
+import { makePdf } from "./pdf.ts";
 
 let fx: Fixture;
 let service: AssistantService | undefined;
@@ -91,8 +93,9 @@ describe("attachments", () => {
 		for (const name of ["dot.png", "data.csv", "spec.pdf", "page.html"]) expect(text).toContain(name);
 		expect(text).toContain('<file name="data.csv">\na,b\n1,2\n</file>');
 		expect(text).toContain("(attached as an image)");
-		// The PDF is not something pi models take: it is a path.
+		// pi models do not take PDFs, and this one has no text to extract: it is a path, and the model is told why.
 		expect(text).not.toContain("attached as a document");
+		expect(text).toMatch(/spec\.pdf .*\(could not be read .*: open it with your tools\)/);
 
 		const display = buildDisplay(items as never, {});
 		const shown = display.find((item) => item.type === "user");
@@ -143,6 +146,63 @@ describe("attachments", () => {
 
 		await expect(service.send(session.id, "", "followUp", "r2")).rejects.toThrow("Empty message");
 		await expect(service.send(session.id, "hi", "followUp", "r3", ["missing"])).rejects.toThrow("No upload missing");
+	});
+
+	test("a Tiny chat reads a PDF's text in the message; an engine that takes PDFs gets the PDF itself", async () => {
+		fx = fixture();
+		fx.faux.setResponses([fauxAssistantMessage("PINEAPPLE")]);
+		const calls: TurnInput[] = [];
+		const engine: Engine = {
+			id: "fake",
+			name: "Fake",
+			note: "",
+			modelProviders: ["faux"],
+			media: { inline: ["application/pdf"] },
+			availability: () => ({ available: true }),
+			async *run(input) {
+				calls.push(input);
+				yield { type: "done" };
+			},
+		};
+		service = await fx.open({ engines: [engine] });
+		const pdf = makePdf([["The secret word is PINEAPPLE"], ["Second page (with parens)"]]);
+		const [memo] = await service.upload([new File([pdf], "memo.pdf", { type: "application/pdf" })]);
+
+		const tiny = await service.createSession({ engine: "pi", text: "What is the word?", attachments: [memo!.id] });
+		await until("the answer", () => service!.db.runs(tiny.id).length > 0);
+		const { items } = await service.entries(tiny.id, undefined, 50);
+		const sent = textOf(
+			(items.find((entry) => entry.kind === USER_ENTRY_KIND)!.model![0] as { content: unknown }).content,
+		);
+		expect(sent).toContain("memo.pdf (application/pdf, ");
+		expect(sent).toContain("(its text, from 2 pages, is below)");
+		expect(sent).toContain(
+			'<file name="memo.pdf">\n--- page 1 ---\nThe secret word is PINEAPPLE\n\n--- page 2 ---\nSecond page (with parens)\n</file>',
+		);
+
+		const claude = await service.createSession({ engine: "fake", text: "And here?", attachments: [memo!.id] });
+		await until(
+			"the turn",
+			async () =>
+				calls.length === 1 && (await service!.harness.snapshot(AgentDoc, claude.id as never, BACKGROUND))?.run === null,
+		);
+		const [attachment] = calls[0]!.attachments;
+		expect(attachment?.inline?.mimeType).toBe("application/pdf");
+		expect(attachment?.text).toBeUndefined();
+	});
+
+	test("PDF text: cut at the limit, and PDFs without text or broken ones say so", async () => {
+		const long = await pdfText(makePdf([["a".repeat(80)], ["b".repeat(80)]]), 100);
+		expect(long.extracted).toEqual({ pages: 2, truncated: true });
+		expect(long.text).toHaveLength(100);
+		expect(long.text).toStartWith("--- page 1 ---\n" + "a".repeat(20));
+
+		const scan = await pdfText(makePdf([[], []]));
+		expect(scan).toEqual({ unreadable: "no text layer in 2 pages (a scan?)" });
+
+		const broken = await pdfText(new TextEncoder().encode("not a pdf"));
+		expect(broken.unreadable).toStartWith("could not be read");
+		expect(broken.text).toBeUndefined();
 	});
 
 	test("a model without image input gets images as paths", async () => {

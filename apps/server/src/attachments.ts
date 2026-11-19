@@ -6,7 +6,8 @@
  *
  * - files whose type the engine takes natively are attached as content: images (resized to fit the model's limits),
  *   and for engines that take them, PDFs, video, ...;
- * - small text files are included in the message;
+ * - small text files are included in the message, and so is the text of a PDF the engine does not take natively
+ *   (pi-ai messages carry only text and images, so a Tiny chat reads PDFs this way, with any model);
  * - every file is listed with its path on this machine, so the engine's tools can open the rest.
  */
 import { mkdirSync } from "node:fs";
@@ -14,6 +15,7 @@ import { basename, join } from "node:path";
 import { DEFAULT_IMAGE_LIMITS, type ImageProcessor } from "@earendil-works/pi-durable/tools";
 import { formatBytes, isImage, isInline } from "@tiny/core/media";
 import type { AttachmentInfo, MediaSupport } from "@tiny/core/protocol";
+import { extractText, getDocumentProxy } from "unpdf";
 import type { AppDb, StoredUpload } from "./db.ts";
 
 export type Attachment = AttachmentInfo & { path: string };
@@ -21,14 +23,24 @@ export type Attachment = AttachmentInfo & { path: string };
 export type PreparedAttachment = Attachment & {
 	/** The file as model content, when the engine takes its type natively. */
 	inline?: { data: string; mimeType: string; resized?: string };
-	/** The file's text, when it is a small text file the engine does not take natively. */
+	/**
+	 * The file's text, when the engine does not take the file natively: a small text file, or the text of a PDF.
+	 */
 	text?: string;
+	/** Set when `text` came out of a PDF: its pages, and whether `text` was cut at the limit. */
+	extracted?: { pages: number; truncated: boolean };
+	/** Set when a PDF has no text to extract (a scan) or could not be read. */
+	unreadable?: string;
 };
 
 /** Images providers take inline; others (HEIC, SVG, TIFF, ...) are converted by the image processor or passed as paths. */
 const INLINE_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 /** Text files up to this size are included in the message. */
 const MAX_INLINE_TEXT = 64 * 1024;
+/** Text extracted from a PDF is included up to this many characters (about 25k tokens); the rest stays in the file. */
+export const MAX_PDF_TEXT = 100_000;
+/** Bigger PDFs are not parsed: their path is enough, and parsing would hold the event loop. */
+const MAX_PDF_BYTES = 50 * 1024 * 1024;
 const TEXT_TYPES = [
 	"application/json",
 	"application/xml",
@@ -120,6 +132,36 @@ async function prepareImage(
 	return result ?? undefined;
 }
 
+/** Extracted PDF text by upload: a turn prepares its attachments twice. */
+const extractedPdfs = new Map<string, Pick<PreparedAttachment, "text" | "extracted" | "unreadable">>();
+
+/**
+ * The text of a PDF, page by page, cut at `max` characters. A PDF without text (a scan, only images) or one that cannot
+ * be parsed says so in `unreadable`.
+ */
+export async function pdfText(
+	bytes: Uint8Array,
+	max = MAX_PDF_TEXT,
+): Promise<Pick<PreparedAttachment, "text" | "extracted" | "unreadable">> {
+	try {
+		// pdf.js may take ownership of the buffer: give it a copy. Verbosity 0 keeps its warnings out of the daemon's log.
+		const document = await getDocumentProxy(new Uint8Array(bytes), { verbosity: 0 });
+		const { totalPages, text } = await extractText(document, { mergePages: false }).finally(() =>
+			document.loadingTask.destroy().catch(() => undefined),
+		);
+		const pages = text.map((page) => page.replace(/[ \t]+\n/g, "\n").trim());
+		if (pages.every((page) => page.length === 0)) {
+			return { unreadable: `no text layer in ${totalPages} page${totalPages === 1 ? "" : "s"} (a scan?)` };
+		}
+		const joined =
+			pages.length === 1 ? pages[0]! : pages.map((page, index) => `--- page ${index + 1} ---\n${page}`).join("\n\n");
+		const truncated = joined.length > max;
+		return { text: truncated ? joined.slice(0, max) : joined, extracted: { pages: totalPages, truncated } };
+	} catch (error) {
+		return { unreadable: `could not be read (${error instanceof Error ? error.message : String(error)})` };
+	}
+}
+
 /** Read the files and decide, per the engine's `media`, what goes to the model as content. */
 export async function prepareAttachments(
 	attachments: readonly Attachment[],
@@ -146,6 +188,19 @@ export async function prepareAttachments(
 			}
 			continue;
 		}
+		if (attachment.mimeType === "application/pdf") {
+			let found = extractedPdfs.get(attachment.id);
+			if (!found) {
+				found =
+					attachment.size <= MAX_PDF_BYTES
+						? await pdfText(await file.bytes())
+						: { unreadable: "too big to extract its text here" };
+				extractedPdfs.set(attachment.id, found);
+				if (extractedPdfs.size > 32) extractedPdfs.delete(extractedPdfs.keys().next().value!);
+			}
+			out.push({ ...attachment, ...found });
+			continue;
+		}
 		if (isText(attachment) && attachment.size <= MAX_INLINE_TEXT) {
 			const text = await file.text();
 			if (!text.includes("\u0000")) {
@@ -170,7 +225,15 @@ export function attachmentNote(attachments: readonly PreparedAttachment[]): stri
 			? isImage(attachment.inline.mimeType)
 				? ` (attached as an image${attachment.inline.resized ? `, ${attachment.inline.resized}` : ""})`
 				: " (attached as a document)"
-			: "";
+			: attachment.extracted
+				? ` (its text, from ${attachment.extracted.pages} page${attachment.extracted.pages === 1 ? "" : "s"}${
+						attachment.extracted.truncated
+							? `, cut at ${attachment.text?.length ?? 0} characters: open the file for the rest`
+							: ""
+					}, is below)`
+				: attachment.unreadable
+					? ` (${attachment.unreadable}: open it with your tools)`
+					: "";
 		lines.push(
 			`- ${attachment.name} (${attachment.mimeType}, ${formatBytes(attachment.size)}): ${attachment.path}${how}`,
 		);
