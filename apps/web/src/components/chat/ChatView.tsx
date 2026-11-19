@@ -1,4 +1,11 @@
-import { buildDisplay, modelsForEngine, type SendMode, sessionUsage, summarizeLive } from "@tiny/core";
+import {
+	type AttachmentInfo,
+	buildDisplay,
+	modelsForEngine,
+	type SendMode,
+	sessionUsage,
+	summarizeLive,
+} from "@tiny/core";
 import {
 	Archive,
 	ArchiveRestore,
@@ -122,10 +129,15 @@ export function ChatView({ sessionId }: { sessionId: number }) {
 		[ui, session?.projectId, sessionId],
 	);
 
-	const onSubmit = async (text: string) => {
+	const onSubmit = async (text: string, attachments: AttachmentInfo[]) => {
 		setStick((value) => value + 1);
-		// false keeps the text in the composer when the message could not be sent.
-		return client.send(sessionId, text, busy ? mode : "followUp");
+		// false keeps the text and files in the composer when the message could not be sent.
+		return client.send(
+			sessionId,
+			text,
+			busy ? mode : "followUp",
+			attachments.map((attachment) => attachment.id),
+		);
 	};
 
 	const questionIndex = items.findLastIndex((item) => item.type === "workflow-run" && item.run.question !== null);
@@ -281,6 +293,7 @@ export function ChatView({ sessionId }: { sessionId: number }) {
 					draftKey={String(sessionId)}
 					placeholder={busy ? "Send a follow-up…" : "Reply…"}
 					onSubmit={onSubmit}
+					media={engine?.media}
 					busy={busy}
 					onStop={() => client.abort(sessionId)}
 					commands={

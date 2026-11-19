@@ -102,12 +102,18 @@ export function startServer(service: AssistantService): Server<SocketData> {
 		},
 		"/api/sessions/:id/messages": {
 			POST: async (request, _url, [id]) => {
-				const input = await body<{ text: string; mode?: "followUp" | "steer"; requestId?: string }>(request);
+				const input = await body<{
+					text?: string;
+					mode?: "followUp" | "steer";
+					requestId?: string;
+					attachments?: string[];
+				}>(request);
 				await service.send(
 					intParam(id, "id"),
-					input.text,
+					input.text ?? "",
 					input.mode ?? "followUp",
 					input.requestId ?? crypto.randomUUID(),
+					input.attachments ?? [],
 				);
 				return json({ ok: true }, 202);
 			},
@@ -136,6 +142,36 @@ export function startServer(service: AssistantService): Server<SocketData> {
 				const before = url.searchParams.get("before");
 				const limit = Number(url.searchParams.get("limit") ?? 50);
 				return json(await service.entries(intParam(id, "id"), before ? intParam(before, "before") : undefined, limit));
+			},
+		},
+		"/api/uploads": {
+			// multipart/form-data, one or more `file` fields.
+			POST: async (request) => {
+				const form = await request.formData().catch(() => {
+					throw new HttpError(400, "Expected multipart/form-data with `file` fields");
+				});
+				const files = form.getAll("file").filter((value) => typeof value !== "string") as File[];
+				return json(await service.upload(files), 201);
+			},
+		},
+		"/api/uploads/:id": {
+			GET: async (_request, url, [id]) => {
+				const upload = service.db.upload(id!);
+				const file = upload && Bun.file(upload.path);
+				if (!upload || !file || !(await file.exists())) throw new HttpError(404, "No such upload");
+				// Shown in the page only when it is a plain image or a PDF; anything else downloads, sandboxed and unsniffed,
+				// so an uploaded HTML or SVG file never runs as the app.
+				const viewable = /^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(upload.mimeType);
+				const disposition = viewable && url.searchParams.get("download") !== "1" ? "inline" : "attachment";
+				return new Response(file, {
+					headers: {
+						"content-type": viewable ? upload.mimeType : "application/octet-stream",
+						"content-disposition": `${disposition}; filename*=UTF-8''${encodeURIComponent(upload.name)}`,
+						"x-content-type-options": "nosniff",
+						"content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'",
+						"cache-control": "private, max-age=31536000, immutable",
+					},
+				});
 			},
 		},
 		"/api/workflows": { GET: async () => json(service.workflows.list()) },
@@ -266,7 +302,13 @@ export function startServer(service: AssistantService): Server<SocketData> {
 				ws.data.follows.delete(message.sessionId);
 				return;
 			case "send":
-				await service.send(message.sessionId, message.text, message.mode ?? "followUp", message.requestId);
+				await service.send(
+					message.sessionId,
+					message.text,
+					message.mode ?? "followUp",
+					message.requestId,
+					message.attachments ?? [],
+				);
 				return;
 			case "abort":
 				await service.abort(message.sessionId);
@@ -280,6 +322,8 @@ export function startServer(service: AssistantService): Server<SocketData> {
 	const server = Bun.serve<SocketData>({
 		hostname: config.host,
 		port: config.port,
+		// Uploads: several files of up to `maxUploadBytes` each in one request.
+		maxRequestBodySize: Math.max(128 * 1024 * 1024, config.maxUploadBytes * 4),
 		idleTimeout: 120,
 		async fetch(request, server) {
 			const url = new URL(request.url);

@@ -15,6 +15,7 @@ import { client } from "../../lib/client.ts";
 import { cn, modelName, usageText } from "../../lib/format.ts";
 import { CopyButton } from "../ui/CopyButton.tsx";
 import { TypingDots } from "../ui/Spinner.tsx";
+import { SentAttachments } from "./Attachments.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { Thinking } from "./Thinking.tsx";
 import { ToolCard } from "./ToolCard.tsx";
@@ -37,6 +38,7 @@ function UserMessage({ item }: { item: Extract<DisplayItem, { type: "user" }> })
 	const long = item.text.length > 1200 || item.text.split("\n").length > 16;
 	return (
 		<div className="group flex flex-col items-end">
+			<SentAttachments attachments={item.attachments} />
 			{item.images.length > 0 && (
 				<div className="mb-2 flex max-w-[85%] flex-wrap justify-end gap-2">
 					{item.images.map((image, index) => (
@@ -401,7 +403,7 @@ function sameItem(prev: Props, next: Props): boolean {
 	switch (a.type) {
 		case "user": {
 			const y = b as typeof a;
-			return a.text === y.text && a.images.length === y.images.length;
+			return a.text === y.text && a.images.length === y.images.length && a.attachments.length === y.attachments.length;
 		}
 		case "assistant": {
 			const y = b as typeof a;

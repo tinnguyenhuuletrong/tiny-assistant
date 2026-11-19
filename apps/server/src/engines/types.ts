@@ -10,6 +10,9 @@
  * To add an engine: implement `Engine` in a file next to this one and list it in `./index.ts`.
  */
 import type { ThinkingLevel } from "@tiny/core/protocol";
+import type { PreparedAttachment } from "../attachments.ts";
+
+export type { PreparedAttachment } from "../attachments.ts";
 
 /** pi-ai's message shapes, as JSON: what the entries' `model` field holds. */
 export type TextBlock = { type: "text"; text: string };
@@ -48,7 +51,14 @@ export type ToolResultMessageData = {
 };
 
 export type TurnInput = {
+	/** What the user typed. */
 	prompt: string;
+	/**
+	 * Files attached to the message, prepared for this engine's `media`: `inline` set on the ones to give the model as
+	 * content, `text` on small text files. Build the message with `promptWithAttachments(prompt, attachments)` (which
+	 * lists every file's path, so tools can open the rest) and add the `inline` ones as content blocks.
+	 */
+	attachments: PreparedAttachment[];
 	/** The session's project folder; absent for a plain chat. */
 	cwd: string | undefined;
 	/** The model id without its provider (`claude-opus-5-5`), or null for the engine's own default. */
@@ -91,6 +101,11 @@ export interface Engine {
 	readonly note: string;
 	/** Model providers whose models this engine can run; absent: all. */
 	readonly modelProviders?: string[];
+	/**
+	 * File types the engine gives the model natively (`image/*`, `application/pdf`, `video/*`, ...). Every other file
+	 * still reaches it, as a path. `maxFileBytes` defaults to the daemon's upload limit.
+	 */
+	readonly media: { inline: string[]; maxFileBytes?: number };
 	/** Whether the engine can run here, and why not. Cheap: called whenever clients load state. */
 	availability(): { available: boolean; reason?: string };
 	/** Run one turn. Events end with `done`; throwing ends the turn as failed with the error's message. */

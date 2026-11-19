@@ -1,4 +1,4 @@
-import { modelsForEngine, pickEngineDefaults, type ThinkingLevel } from "@tiny/core";
+import { type AttachmentInfo, modelsForEngine, pickEngineDefaults, type ThinkingLevel } from "@tiny/core";
 import { PanelLeft, Workflow } from "lucide-react";
 import { useState } from "react";
 import { client } from "../../lib/client.ts";
@@ -47,12 +47,13 @@ export function NewChat({ initialProject }: { initialProject?: string | null }) 
 	const currentModel = models.find((item) => `${item.provider}/${item.id}` === modelValue);
 	const thinkingValue = thinking ?? state?.defaults.thinking ?? "off";
 
-	const submit = async (text: string) => {
+	const submit = async (text: string, attachments: AttachmentInfo[]) => {
 		setSubmitting(true);
 		const session = await attempt(() =>
 			client.createSession({
 				projectId,
 				text,
+				...(attachments.length > 0 ? { attachments: attachments.map((attachment) => attachment.id) } : {}),
 				...(engine ? { engine: engine.id } : {}),
 				model: modelValue ?? undefined,
 				thinking: thinking ?? undefined,
@@ -89,6 +90,7 @@ export function NewChat({ initialProject }: { initialProject?: string | null }) 
 					draftKey="new"
 					placeholder="How can I help you today?"
 					onSubmit={submit}
+					media={engine?.media}
 					submitting={submitting}
 					commands={engine?.workflows === false ? [] : COMMANDS}
 					workflows={state?.workflows}

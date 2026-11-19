@@ -7,6 +7,7 @@
 		".": "./src/index.ts",
 		"./protocol": "./src/protocol.ts",
 		"./display": "./src/display.ts",
+		"./media": "./src/media.ts",
 		"./client": "./src/client.ts",
 		"./define": "./src/define.ts"
 	},

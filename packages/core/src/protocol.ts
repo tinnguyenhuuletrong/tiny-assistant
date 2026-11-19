@@ -72,7 +72,33 @@ export type ModelInfo = {
 	name: string;
 	reasoning: boolean;
 	contextWindow?: number;
+	/** What the model takes as input (`text`, `image`, ...), when the provider says. */
+	input?: string[];
 };
+
+/** A file the user uploaded, to attach to a message. Uploaded first (`POST /api/uploads`), then sent by `id`. */
+export type AttachmentInfo = {
+	id: string;
+	name: string;
+	mimeType: string;
+	/** Bytes. */
+	size: number;
+};
+
+/**
+ * What an engine takes besides text. Files whose type matches `inline` go to the model as content (images, PDFs, video,
+ * as the engine supports); every other file is still saved on the daemon's machine and given to the engine as a path
+ * its tools can open, and small text files are included in the message.
+ */
+export type MediaSupport = {
+	/** MIME types or `type/*` patterns the engine passes to the model natively. */
+	inline: string[];
+	/** Largest file a message may carry, in bytes. */
+	maxFileBytes: number;
+};
+
+/** Data of a user message entry that carries attachments: what the user typed, and the files. */
+export type UserEntryData = { text: string; attachments: AttachmentInfo[] };
 
 export type WorkflowInfo = {
 	name: string;
@@ -112,6 +138,8 @@ export type EngineInfo = {
 	compact: boolean;
 	/** Workflows can run in its sessions. */
 	workflows: boolean;
+	/** What it takes besides text. */
+	media: MediaSupport;
 };
 
 export type ServerState = {
@@ -171,7 +199,15 @@ export type ClientMessage =
 	| { t: "hello"; client: "web" | "tui"; name?: string }
 	| { t: "subscribe"; sessionId: number; window?: number }
 	| { t: "unsubscribe"; sessionId: number }
-	| { t: "send"; sessionId: number; text: string; requestId: string; mode?: SendMode }
+	| {
+			t: "send";
+			sessionId: number;
+			text: string;
+			requestId: string;
+			mode?: SendMode;
+			/** Upload IDs (`AttachmentInfo.id`). */
+			attachments?: string[];
+	  }
 	| { t: "abort"; sessionId: number }
 	| { t: "ping" };
 
@@ -184,6 +220,9 @@ export type ServerMessage =
 	| { t: "error"; message: string; sessionId?: number }
 	| { t: "registry"; workflows: WorkflowInfo[]; tools: ToolInfo[]; models: ModelInfo[]; engines: EngineInfo[] }
 	| { t: "pong" };
+
+/** A Tiny (pi) session's user message with attachments; its data is `UserEntryData`. */
+export const USER_ENTRY_KIND = "tiny.user";
 
 /** Custom entry kinds written by the assistant (never `pi.*`). */
 export const ENTRY_KINDS = {

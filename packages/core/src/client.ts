@@ -5,6 +5,7 @@
  */
 import { applyImmutable, type Op } from "@earendil-works/chord/delta";
 import type {
+	AttachmentInfo,
 	ClientMessage,
 	ConversationViewValue,
 	DirListing,
@@ -286,14 +287,20 @@ export class AssistantClient {
 	 * Send a message. Resolves `false` when it could not be handed to the daemon (socket down and the REST fallback
 	 * failed), so a composer can keep the text; the error is also reported through `onError`.
 	 */
-	async send(sessionId: number, text: string, mode: SendMode = "followUp"): Promise<boolean> {
+	async send(
+		sessionId: number,
+		text: string,
+		mode: SendMode = "followUp",
+		attachments: readonly string[] = [],
+	): Promise<boolean> {
 		const requestId = newRequestId();
+		const files = attachments.length > 0 ? { attachments: [...attachments] } : {};
 		if (this.#socket?.readyState === WebSocket.OPEN) {
-			this.#send({ t: "send", sessionId, text, requestId, mode });
+			this.#send({ t: "send", sessionId, text, requestId, mode, ...files });
 			return true;
 		}
 		try {
-			await this.#post(`/api/sessions/${sessionId}/messages`, { text, mode, requestId });
+			await this.#post(`/api/sessions/${sessionId}/messages`, { text, mode, requestId, ...files });
 			return true;
 		} catch (error) {
 			this.#fail(error instanceof Error ? error.message : String(error), sessionId);
@@ -310,12 +317,13 @@ export class AssistantClient {
 
 	async #request<T>(method: string, path: string, body?: unknown): Promise<T> {
 		const headers: Record<string, string> = {};
-		if (body !== undefined) headers["content-type"] = "application/json";
+		const form = typeof FormData !== "undefined" && body instanceof FormData;
+		if (body !== undefined && !form) headers["content-type"] = "application/json";
 		if (this.#token) headers.authorization = `Bearer ${this.#token}`;
 		const response = await fetch(`${this.#base}${path}`, {
 			method,
 			headers,
-			body: body === undefined ? undefined : JSON.stringify(body),
+			body: body === undefined ? undefined : form ? (body as FormData) : JSON.stringify(body),
 		});
 		const text = await response.text();
 		const json = text ? JSON.parse(text) : undefined;
@@ -360,6 +368,8 @@ export class AssistantClient {
 		model?: string;
 		thinking?: ThinkingLevel;
 		text?: string;
+		/** Upload IDs to attach to the first message. */
+		attachments?: string[];
 	}): Promise<SessionInfo> {
 		return this.#post("/api/sessions", input);
 	}
@@ -400,6 +410,25 @@ export class AssistantClient {
 	/** Answer a question a workflow asked; the run continues with it. */
 	answerWorkflow(input: { sessionId: number; runId: number; key: string; value: string }): Promise<void> {
 		return this.#post(`/api/workflows/${input.runId}/answer`, input);
+	}
+
+	/**
+	 * Upload files to attach to a message: send their `id`s with `send()` or `createSession()`. Images are kept as
+	 * uploaded; the daemon prepares what each engine's model takes.
+	 */
+	upload(files: readonly (Blob & { name?: string })[]): Promise<AttachmentInfo[]> {
+		const form = new FormData();
+		for (const [index, file] of files.entries()) form.append("file", file, file.name || `file-${index + 1}`);
+		return this.#post("/api/uploads", form);
+	}
+
+	/** Where to show or download an uploaded file (carries the token, so it works in `<img src>` and links). */
+	uploadUrl(id: string, options: { download?: boolean } = {}): string {
+		const params = new URLSearchParams();
+		if (this.#token) params.set("token", this.#token);
+		if (options.download) params.set("download", "1");
+		const query = params.toString();
+		return `${this.#base}/api/uploads/${encodeURIComponent(id)}${query ? `?${query}` : ""}`;
 	}
 
 	search(query: string): Promise<SearchHit[]> {

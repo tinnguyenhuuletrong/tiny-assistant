@@ -18,11 +18,13 @@ import {
 	type Registry,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { CodingTools, type ImageProcessor } from "@earendil-works/pi-durable/tools";
 import {
 	AGENT_DOC,
 	type AgentLiveData,
+	type AttachmentInfo,
 	type ConversationViewValue,
 	type DeltaOp,
 	type EngineInfo,
@@ -32,6 +34,7 @@ import {
 	type ServerState,
 	type SessionInfo,
 	type ThinkingLevel,
+	USER_ENTRY_KIND,
 	type ViewEntry,
 } from "@tiny/core/protocol";
 import {
@@ -43,6 +46,14 @@ import {
 	createAgentTask,
 	newAgentData,
 } from "./agent.ts";
+import {
+	type Attachment,
+	attachmentInfo,
+	type PreparedAttachment,
+	prepareAttachments,
+	UploadStore,
+	userContent,
+} from "./attachments.ts";
 import type { Config } from "./config.ts";
 import { AppDb, type IndexedMessage, type ToolCallRecord } from "./db.ts";
 import { createEngines, type Engine, EngineRegistry, PI_ENGINE } from "./engines/index.ts";
@@ -128,6 +139,8 @@ export class AssistantService {
 	readonly workflows: WorkflowCatalog;
 	readonly loader: UserCodeLoader;
 	readonly engines: EngineRegistry;
+	readonly uploads: UploadStore;
+	readonly images: ImageProcessor | undefined;
 	readonly #workflowTask: WorkflowTaskDef;
 	readonly #agentTask: AgentTaskDef;
 	modelList: ModelInfo[] = [];
@@ -160,8 +173,12 @@ export class AssistantService {
 			workflowTask: WorkflowTaskDef;
 			engines: EngineRegistry;
 			agentTask: AgentTaskDef;
+			uploads: UploadStore;
+			images: ImageProcessor | undefined;
 		},
 	) {
+		this.uploads = parts.uploads;
+		this.images = parts.images;
 		this.db = parts.db;
 		this.harness = parts.harness;
 		this.models = parts.models;
@@ -175,11 +192,12 @@ export class AssistantService {
 
 	/**
 	 * `options.models` replaces the configured providers (tests pass pi-ai's faux provider); `options.engines` replaces
-	 * the configured engines (tests pass scripted ones).
+	 * the configured engines (tests pass scripted ones); `options.images` replaces the Photon image processor (`null`:
+	 * none, images within the limits pass as they are).
 	 */
 	static async open(
 		config: Config,
-		options: { models?: MutableModels; engines?: Engine[] } = {},
+		options: { models?: MutableModels; engines?: Engine[]; images?: ImageProcessor | null } = {},
 	): Promise<AssistantService> {
 		mkdirSync(config.dataDir, { recursive: true });
 		const dbPath = join(config.dataDir, "assistant.sqlite");
@@ -193,11 +211,25 @@ export class AssistantService {
 			waiting: (sessionId, runId, key, open) => service?.setWaiting(sessionId, `${runId}:${key}`, open),
 		});
 
-		const engines = new EngineRegistry(options.engines ?? createEngines(config));
-		const agentTask = createAgentTask(engines, (sessionId) => {
-			const session = db.session(sessionId);
-			return session && { engine: session.engine, model: session.model, thinking: session.thinking, cwd: session.cwd };
-		});
+		const engines = new EngineRegistry(options.engines ?? createEngines(config), config.maxUploadBytes);
+		const uploads = new UploadStore(join(config.dataDir, "uploads"), db, config.maxUploadBytes);
+		const images =
+			options.images === undefined
+				? await createNodePhotonImages().catch((error) => {
+						console.warn(`[images] no image processor, images pass as they are: ${error}`);
+						return undefined;
+					})
+				: (options.images ?? undefined);
+		const agentTask = createAgentTask(
+			engines,
+			(sessionId) => {
+				const session = db.session(sessionId);
+				return (
+					session && { engine: session.engine, model: session.model, thinking: session.thinking, cwd: session.cwd }
+				);
+			},
+			(sessionId, attachments) => service!.prepareFor(sessionId, attachments),
+		);
 
 		registry.install(CodingTools);
 		registry.install(createPromptExtension(config.assistantDir));
@@ -241,6 +273,8 @@ export class AssistantService {
 			workflowTask,
 			engines,
 			agentTask,
+			uploads,
+			images,
 		});
 		await service.refreshModels();
 		loader.watch();
@@ -440,6 +474,8 @@ export class AssistantService {
 		model?: string;
 		thinking?: ThinkingLevel;
 		text?: string;
+		/** Upload IDs to attach to the first message. */
+		attachments?: string[];
 		workflow?: string;
 	}): Promise<SessionInfo> {
 		const project = input.projectId ? this.db.project(input.projectId) : undefined;
@@ -484,7 +520,13 @@ export class AssistantService {
 		this.db.insertSession({
 			id,
 			projectId: project?.id ?? null,
-			title: input.title?.trim() || (input.text ? titleFrom(input.text) : "New chat"),
+			title:
+				input.title?.trim() ||
+				(input.text?.trim()
+					? titleFrom(input.text)
+					: input.attachments?.length
+						? titleFrom(`📎 ${this.uploads.resolve(input.attachments)[0]?.name ?? "Files"}`)
+						: "New chat"),
 			createdAt: now,
 			updatedAt: now,
 			engine,
@@ -494,7 +536,8 @@ export class AssistantService {
 			workflow: input.workflow ?? null,
 		});
 		if (!input.workflow) this.db.rememberEngine(engine, model, { asDefault: true });
-		if (input.text?.trim()) await this.send(id, input.text, "followUp", crypto.randomUUID());
+		if (input.text?.trim() || input.attachments?.length)
+			await this.send(id, input.text ?? "", "followUp", crypto.randomUUID(), input.attachments ?? []);
 		this.#sessionsChanged();
 		return this.session(id)!;
 	}
@@ -560,23 +603,72 @@ export class AssistantService {
 		return this.session(id)!;
 	}
 
-	async send(id: number, text: string, mode: SendMode, requestId: string): Promise<void> {
+	/** Save uploaded files; send their IDs with a message to attach them. */
+	async upload(files: readonly (Blob & { name?: string })[]): Promise<AttachmentInfo[]> {
+		if (files.length === 0) throw new HttpError(400, "No files");
+		const saved = [];
+		for (const file of files) {
+			try {
+				saved.push(await this.uploads.save(file));
+			} catch (error) {
+				throw new HttpError(413, error instanceof Error ? error.message : String(error));
+			}
+		}
+		await outsideDurableCommit();
+		for (const upload of saved) this.db.insertUpload(upload);
+		return saved.map(attachmentInfo);
+	}
+
+	/** Attachments prepared for what a session's engine (and, for pi, its model) takes natively. */
+	prepareFor(sessionId: number, attachments: readonly Attachment[]): Promise<PreparedAttachment[]> {
+		if (attachments.length === 0) return Promise.resolve([]);
+		const session = this.db.session(sessionId);
+		const model = this.modelList.find((candidate) => `${candidate.provider}/${candidate.id}` === session?.model);
+		return prepareAttachments(attachments, this.engines.media(session?.engine ?? PI_ENGINE, model), this.images);
+	}
+
+	async send(
+		id: number,
+		text: string,
+		mode: SendMode,
+		requestId: string,
+		attachmentIds: readonly string[] = [],
+	): Promise<void> {
 		const content = text.trim();
-		if (!content) throw new HttpError(400, "Empty message");
+		let attachments: Attachment[];
+		try {
+			attachments = this.uploads.resolve(attachmentIds);
+		} catch (error) {
+			throw new HttpError(400, error instanceof Error ? error.message : String(error));
+		}
+		if (!content && attachments.length === 0) throw new HttpError(400, "Empty message");
 		const conversation = await this.#conversation(id);
 		await this.#feed(id); // follow it, so busy state and indexing track the run
-		if (this.#engineOf(id) !== PI_ENGINE) await this.#sendToEngine(conversation, content, requestId);
-		else
+		if (this.#engineOf(id) !== PI_ENGINE) await this.#sendToEngine(conversation, content, requestId, attachments);
+		else {
+			const prepared = await this.prepareFor(id, attachments);
 			await conversation.submit(
-				{ type: "input", content, requestId, ...(mode === "steer" ? { whenBusy: "steer" as const } : {}) },
+				{
+					type: "input",
+					content: userContent(content, prepared) as never,
+					requestId,
+					...(mode === "steer" ? { whenBusy: "steer" as const } : {}),
+					...(attachments.length > 0
+						? {
+								entry: { kind: USER_ENTRY_KIND, data: { text: content, attachments: attachments.map(attachmentInfo) } },
+							}
+						: {}),
+				},
 				context,
 			);
+		}
 		await outsideDurableCommit();
 		const session = this.db.session(id);
+		const summary = content || `📎 ${attachments.map((attachment) => attachment.name).join(", ")}`;
 		this.db.updateSession(id, {
 			updatedAt: Date.now(),
-			preview: content.slice(0, 160),
-			...(session?.title === "New chat" ? { title: titleFrom(content) } : {}),
+			preview: summary.slice(0, 160),
+			...(session?.title === "New chat" ? { title: titleFrom(summary) } : {}),
 		});
 		this.#sessionsChanged();
 	}
@@ -589,13 +681,22 @@ export class AssistantService {
 	 * One engine turn per message, as a task owned by the conversation. A message sent while a turn runs queues behind
 	 * the last queued turn (engines take no steering yet). A resent request ID is ignored.
 	 */
-	async #sendToEngine(conversation: Conversation, prompt: string, requestId: string): Promise<void> {
+	async #sendToEngine(
+		conversation: Conversation,
+		prompt: string,
+		requestId: string,
+		attachments: readonly Attachment[] = [],
+	): Promise<void> {
 		await conversation.commit(async (tx) => {
 			const doc = await tx.doc(AgentDoc, conversation.id);
 			if (doc.requests.includes(requestId)) return;
 			doc.requests = [...doc.requests.slice(-49), requestId];
 			const after = doc.queue.at(-1) ?? doc.run?.taskId ?? null;
-			const taskId = await tx.createTask(this.#agentTask, { prompt, after }, { ownership: { kind: "conversation" } });
+			const taskId = await tx.createTask(
+				this.#agentTask,
+				{ prompt, after, ...(attachments.length > 0 ? { attachments: [...attachments] } : {}) },
+				{ ownership: { kind: "conversation" } },
+			);
 			// Queued until its `start` phase takes it off, so a message sent right after this one waits for it.
 			doc.queue.push(Number(taskId));
 		}, context);

@@ -24,10 +24,13 @@ import {
 import {
 	AssistantClient,
 	type AssistantPart,
+	type AttachmentInfo,
 	buildDisplay,
 	type DisplayItem,
 	type EngineInfo,
 	failureText,
+	formatBytes,
+	isImage,
 	modelsForEngine,
 	type ProjectInfo,
 	pickEngineDefaults,
@@ -40,6 +43,7 @@ import {
 	type WorkflowRun,
 	type WorkflowStepStatus,
 } from "@tiny/core";
+import { type LocalFile, pastedPaths, readClipboardFiles, readLocalFile } from "./attach.ts";
 import { c, editorTheme, markdownTheme, selectListTheme } from "./theme.ts";
 
 // ---- arguments ----
@@ -98,6 +102,10 @@ type UiState = {
 	draftEngine: string | null;
 	draftModel: string | null;
 	draftThinking: ThinkingLevel;
+	/** Files uploaded for the next message. */
+	pending: AttachmentInfo[];
+	/** Files still uploading. */
+	uploading: number;
 	expanded: boolean;
 	notice: { text: string; level: "info" | "error" } | null;
 	spinner: number;
@@ -109,6 +117,8 @@ const ui: UiState = {
 	draftEngine: null,
 	draftModel: null,
 	draftThinking: "medium",
+	pending: [],
+	uploading: 0,
 	expanded: false,
 	notice: null,
 	spinner: 0,
@@ -266,7 +276,13 @@ class ItemView {
 		};
 		switch (item.type) {
 			case "user": {
-				const text = item.text + (item.images.length > 0 ? c.dim(` [${item.images.length} image(s)]`) : "");
+				const files = item.attachments.map(
+					(file) => `[${isImage(file.mimeType) ? "image" : "file"}: ${file.name}, ${formatBytes(file.size)}]`,
+				);
+				const text =
+					item.text +
+					(item.images.length > 0 ? c.dim(` [${item.images.length} image(s)]`) : "") +
+					(files.length > 0 ? `${item.text ? "\n" : ""}${c.dim(files.join(" "))}` : "");
 				this.container.addChild(new Text(indent(text.split("\n"), c.accent("› ")), 0, 1));
 				break;
 			}
@@ -462,9 +478,16 @@ function render(): void {
 			: "";
 	const hints = elsewhere
 		? "/ commands · ctrl+p sessions"
-		: "/ commands · ctrl+p sessions · ctrl+n new · ctrl+o expand · ctrl+c quit";
+		: "/ commands · ctrl+p sessions · ctrl+n new · ctrl+v paste image · ctrl+o expand · ctrl+c quit";
+	const attached =
+		ui.pending.length > 0 || ui.uploading > 0
+			? `${c.accent(`📎 ${[...ui.pending.map((file) => file.name), ...(ui.uploading > 0 ? [`${ui.uploading} uploading…`] : [])].join(", ")}`)} ${c.dim("(/detach clears) · ")}`
+			: "";
 	footer.setText(
-		truncateToWidth(`${elsewhere}${c.dim(`${hints}${cost}`)}`, Math.max(20, (process.stdout.columns ?? 80) - 2)),
+		truncateToWidth(
+			`${elsewhere}${attached}${c.dim(`${hints}${cost}`)}`,
+			Math.max(20, (process.stdout.columns ?? 80) - 2),
+		),
 	);
 	tui.requestRender();
 }
@@ -541,18 +564,62 @@ function newChat(projectId?: string | null): void {
 	openSession(null);
 }
 
+/** Upload files and keep them for the next message. */
+async function attach(files: LocalFile[]): Promise<void> {
+	if (files.length === 0) return;
+	const max = currentEngine()?.media.maxFileBytes;
+	const fitting = files.filter((file) => {
+		if (max && file.bytes.length > max) {
+			notify(`${file.name} is ${formatBytes(file.bytes.length)}; the limit is ${formatBytes(max)}`, "error");
+			return false;
+		}
+		return true;
+	});
+	if (fitting.length === 0) return;
+	ui.uploading += fitting.length;
+	render();
+	try {
+		const uploaded = await client.upload(
+			fitting.map((file) => new File([file.bytes as Uint8Array<ArrayBuffer>], file.name, { type: file.type })),
+		);
+		ui.pending.push(...uploaded);
+		notify(`Attached ${uploaded.map((file) => file.name).join(", ")}`);
+	} catch (error) {
+		notify(`Upload failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+	} finally {
+		ui.uploading -= fitting.length;
+		render();
+	}
+}
+
+/** Ctrl+V: attach the image or the files on the clipboard. */
+function pasteFromClipboard(): boolean {
+	const files = readClipboardFiles();
+	if (files.length === 0) return false;
+	void attach(files);
+	return true;
+}
+
 async function submit(text: string): Promise<void> {
 	const trimmed = text.trim();
-	if (!trimmed) return;
+	if (!trimmed && ui.pending.length === 0) return;
 	if (trimmed.startsWith("/")) {
 		await command(trimmed);
 		return;
 	}
+	if (ui.uploading > 0) {
+		editor.setText(text);
+		notify("Wait for the files to finish uploading", "error");
+		return;
+	}
+	const attachments = ui.pending.map((file) => file.id);
+	ui.pending = [];
 	if (ui.sessionId === null) {
 		const { engine, model } = draftChoice();
 		const session = await client.createSession({
 			projectId: ui.draftProject,
 			text: trimmed,
+			...(attachments.length > 0 ? { attachments } : {}),
 			...(engine ? { engine: engine.id } : {}),
 			...(model ? { model } : {}),
 			thinking: ui.draftThinking,
@@ -560,8 +627,9 @@ async function submit(text: string): Promise<void> {
 		openSession(session.id);
 		return;
 	}
-	void client.send(ui.sessionId, trimmed, current()?.busy && steerNext ? "steer" : "followUp");
+	void client.send(ui.sessionId, trimmed, current()?.busy && steerNext ? "steer" : "followUp", attachments);
 	steerNext = false;
+	render();
 }
 
 let steerNext = false;
@@ -629,7 +697,7 @@ async function command(line: string): Promise<void> {
 	switch (name) {
 		case "help":
 			notify(
-				"/new /sessions /project [path] /engine /model /thinking <lvl> /run <wf> [json] /answer /rename /archive /pin /compact /reset /continue /steer /earlier /quit",
+				"/new /sessions /project [path] /engine /model /attach /detach /thinking <lvl> /run <wf> [json] /answer /rename /archive /pin /compact /reset /continue /steer /earlier /quit",
 			);
 			return;
 		case "new":
@@ -822,6 +890,28 @@ async function command(line: string): Promise<void> {
 		case "earlier":
 			await client.loadEarlier(needSession());
 			return;
+		case "attach": {
+			if (!arg) {
+				if (!pasteFromClipboard()) notify("No image or files on the clipboard. Usage: /attach <path> [more paths]");
+				return;
+			}
+			const paths =
+				pastedPaths(arg) ??
+				pastedPaths(
+					arg
+						.split(/\s+/)
+						.map((part) => (/^[./~]/.test(part) ? part : `./${part}`))
+						.join(" "),
+				);
+			if (!paths) throw new Error(`Not a file: ${arg}`);
+			await attach(paths.map(readLocalFile));
+			return;
+		}
+		case "detach":
+			ui.pending = [];
+			notify("Attachments cleared");
+			render();
+			return;
 		case "stop":
 			client.abort(needSession());
 			return;
@@ -869,6 +959,12 @@ const commands: SlashCommand[] = [
 	{ name: "continue", description: "Resume after a failed or stopped run" },
 	{ name: "steer", description: "Steer the running turn", argumentHint: "<message>" },
 	{ name: "earlier", description: "Load earlier messages" },
+	{
+		name: "attach",
+		description: "Attach files (or the clipboard's image); ctrl+v pastes images too",
+		argumentHint: "[path…]",
+	},
+	{ name: "detach", description: "Drop the files attached to the next message" },
 	{ name: "stop", description: "Stop the running turn" },
 	{ name: "help", description: "Show commands" },
 	{ name: "quit", description: "Exit" },
@@ -920,6 +1016,21 @@ tui.addInputListener((data) => {
 		ui.expanded = !ui.expanded;
 		render();
 		return { consume: true };
+	}
+	if (matchesKey(data, "ctrl+v")) {
+		if (!pasteFromClipboard()) notify("No image or files on the clipboard (text pastes with your terminal's paste)");
+		return { consume: true };
+	}
+	// Files dragged into the terminal arrive as a pasted path: attach them instead of typing the path.
+	const start = "\x1b[200~";
+	const end = "\x1b[201~";
+	const paste = data.startsWith(start) && data.endsWith(end) ? [data, data.slice(start.length, -end.length)] : null;
+	if (paste) {
+		const paths = pastedPaths(paste[1]!);
+		if (paths) {
+			void attach(paths.map(readLocalFile));
+			return { consume: true };
+		}
 	}
 	return undefined;
 });
