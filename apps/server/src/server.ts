@@ -3,6 +3,7 @@
  */
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { isViewable } from "@tiny/core/media";
 import type { ClientMessage, DirListing, ServerMessage } from "@tiny/core/protocol";
 import type { Server, ServerWebSocket } from "bun";
 import { authorize } from "./auth.ts";
@@ -160,15 +161,22 @@ export function startServer(service: AssistantService): Server<SocketData> {
 				const file = upload && Bun.file(upload.path);
 				if (!upload || !file || !(await file.exists())) throw new HttpError(404, "No such upload");
 				// Shown in the page only when it is a plain image or a PDF; anything else downloads, sandboxed and unsniffed,
-				// so an uploaded HTML or SVG file never runs as the app.
-				const viewable = /^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(upload.mimeType);
+				// so an uploaded HTML or SVG file never runs as the app. PDFs skip the sandbox: Chrome does not open its PDF
+				// viewer in a sandboxed document.
+				const viewable = isViewable(upload.mimeType);
 				const disposition = viewable && url.searchParams.get("download") !== "1" ? "inline" : "attachment";
+				const pdf = upload.mimeType === "application/pdf";
 				return new Response(file, {
 					headers: {
 						"content-type": viewable ? upload.mimeType : "application/octet-stream",
 						"content-disposition": `${disposition}; filename*=UTF-8''${encodeURIComponent(upload.name)}`,
 						"x-content-type-options": "nosniff",
-						"content-security-policy": "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'",
+						...(pdf && disposition === "inline"
+							? {}
+							: {
+									"content-security-policy":
+										"sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'",
+								}),
 						"cache-control": "private, max-age=31536000, immutable",
 					},
 				});

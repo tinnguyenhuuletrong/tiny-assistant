@@ -131,10 +131,10 @@ Attach files to any message, in either engine:
 
 What the model gets depends on the engine. Each engine declares the file types it takes natively (`media.inline`):
 
-| Engine      | Given to the model                                             |
-| ----------- | -------------------------------------------------------------- |
+| Engine      | Given to the model                                              |
+| ----------- | --------------------------------------------------------------- |
 | Tiny (pi)   | images (when the chat's model takes images); PDFs as their text |
-| Claude Code | images and PDFs                                                |
+| Claude Code | images and PDFs                                                 |
 
 Every other file still reaches it. Small text files (Markdown, code, CSV, JSON, ...; up to 64 KB) are included in the
 message, and so is the text of a PDF the engine does not take natively: pi-ai messages carry only text and images, so a

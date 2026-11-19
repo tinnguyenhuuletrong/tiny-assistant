@@ -1,4 +1,4 @@
-import { type AttachmentInfo, describeMedia, formatBytes, isImage, type MediaSupport } from "@tiny/core";
+import { type AttachmentInfo, describeMedia, formatBytes, isImage, isViewable, type MediaSupport } from "@tiny/core";
 import { CircleAlert, FileText, Paperclip, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { client } from "../../lib/client.ts";
@@ -183,9 +183,8 @@ export function AttachButton({
 /** Files attached to a sent message: image thumbnails that open full size, other files as download links. */
 export function SentAttachments({ attachments }: { attachments: readonly AttachmentInfo[] }) {
 	if (attachments.length === 0) return null;
-	const images = attachments.filter(
-		(attachment) => isImage(attachment.mimeType) && !/svg|heic|heif|tiff/i.test(attachment.mimeType),
-	);
+	// Only what the daemon serves inline renders as a picture; other images (BMP, AVIF, SVG, HEIC, ...) are download chips.
+	const images = attachments.filter((attachment) => isImage(attachment.mimeType) && isViewable(attachment.mimeType));
 	const others = attachments.filter((attachment) => !images.includes(attachment));
 	return (
 		<div className="mb-2 flex max-w-[85%] flex-col items-end gap-2">

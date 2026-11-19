@@ -65,6 +65,12 @@ function permissionMode(value: string | undefined): Config["claude"]["permission
 	return mode;
 }
 
+function uploadLimit(value: string | undefined): number {
+	const megabytes = Number(value?.trim() || 30);
+	if (!Number.isFinite(megabytes) || megabytes <= 0) throw new Error("TINY_MAX_UPLOAD_MB must be a positive number");
+	return Math.round(megabytes * 1024 * 1024);
+}
+
 function chromeSetting(value: string | undefined): boolean | undefined {
 	switch (value?.trim().toLowerCase() || "on") {
 		case "on":
@@ -88,7 +94,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		webDir,
 		providers: list(env.TINY_PROVIDERS ?? "claude-code"),
 		defaultModel: env.TINY_DEFAULT_MODEL || undefined,
-		maxUploadBytes: Math.round(Number(env.TINY_MAX_UPLOAD_MB || 30) * 1024 * 1024),
+		maxUploadBytes: uploadLimit(env.TINY_MAX_UPLOAD_MB),
 		engines: list(env.TINY_ENGINES ?? "claude-code"),
 		claude: {
 			command: env.TINY_CLAUDE_COMMAND || env.PI_CLAUDE_CODE_COMMAND || "claude",

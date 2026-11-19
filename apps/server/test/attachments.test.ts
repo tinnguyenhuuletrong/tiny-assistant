@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { BACKGROUND_CONTEXT as BACKGROUND } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { AssistantClient, buildDisplay, USER_ENTRY_KIND } from "@tiny/core";
 import { AgentDoc } from "../src/agent.ts";
 import { pdfText } from "../src/attachments.ts";
+import { loadConfig } from "../src/config.ts";
 import type { Engine, TurnInput } from "../src/engines/types.ts";
 import { startServer } from "../src/server.ts";
 import type { AssistantService } from "../src/service.ts";
@@ -219,5 +222,101 @@ describe("attachments", () => {
 		).content;
 		expect(content.some((part) => part.type === "image")).toBe(false);
 		expect(textOf(content)).toContain("dot.png");
+	});
+
+	test("review fixes: stale uploads, partial batches, PDF serving, typed-text search, unreadable files", async () => {
+		fx = fixture();
+		fx.faux.setResponses([fauxAssistantMessage("ok"), fauxAssistantMessage("ok")]);
+		service = await fx.open();
+		const server = startServer(service);
+		const client = new AssistantClient({ baseUrl: `http://127.0.0.1:${server.port}`, client: "tui" });
+		try {
+			// A stale upload ID is refused before anything is created.
+			const before = service.sessions().length;
+			await expect(client.createSession({ text: "hi", attachments: ["gone"] })).rejects.toThrow("No upload gone");
+			await expect(client.createSession({ attachments: ["gone"] })).rejects.toThrow("No upload gone");
+			expect(service.sessions().length).toBe(before);
+
+			// A batch with one file too big stores none of it.
+			const uploadsDir = join(fx.config.dataDir, "uploads");
+			const stored = () =>
+				existsSync(uploadsDir)
+					? readdirSync(uploadsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length
+					: 0;
+			const count = stored();
+			await expect(
+				client.upload([new File(["ok"], "ok.txt"), new File([new Uint8Array(6 * 1024 * 1024)], "big.bin")]),
+			).rejects.toThrow("limit");
+			expect(stored()).toBe(count);
+
+			// PDFs open in the browser's viewer (no sandbox); HTML stays a sandboxed download.
+			const [pdf] = await client.upload([new File([makePdf([["hello"]])], "a.pdf", { type: "application/pdf" })]);
+			const served = await fetch(client.uploadUrl(pdf!.id));
+			expect(served.headers.get("content-disposition")).toStartWith("inline");
+			expect(served.headers.get("content-security-policy")).toBeNull();
+			const download = await fetch(client.uploadUrl(pdf!.id, { download: true }));
+			expect(download.headers.get("content-security-policy")).toContain("sandbox");
+
+			// Search finds what the user typed, not the attached file's text.
+			const [notes] = await service.upload([
+				new File(["zucchini appears only here"], "notes.txt", { type: "text/plain" }),
+			]);
+			const chat = await service.createSession({ text: "summarize please", attachments: [notes!.id] });
+			await until("indexed", () => service!.db.search("summarize").some((hit) => hit.sessionId === chat.id));
+			expect(service.db.search("zucchini").some((hit) => hit.role === "user")).toBe(false);
+
+			// A file that cannot be read any more still goes out, as its path.
+			const [locked] = await service.upload([new File([PNG], "locked.png", { type: "image/png" })]);
+			chmodSync(service.db.upload(locked!.id)!.path, 0o000);
+			const lockedChat = await service.createSession({ text: "and this", attachments: [locked!.id] });
+			await until("the answer", () => service!.db.runs(lockedChat.id).length > 0);
+			const { items } = await service.entries(lockedChat.id, undefined, 50);
+			const sent = textOf(
+				(items.find((entry) => entry.kind === USER_ENTRY_KIND)!.model![0] as { content: unknown }).content,
+			);
+			expect(sent).toContain("locked.png");
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	test("PDFs over the API's limits go as their text; long PDFs are read only up to the limit", async () => {
+		fx = fixture();
+		const calls: TurnInput[] = [];
+		const engine: Engine = {
+			id: "fake",
+			name: "Fake",
+			note: "",
+			modelProviders: ["faux"],
+			media: { inline: ["application/pdf"] },
+			availability: () => ({ available: true }),
+			async *run(input) {
+				calls.push(input);
+				yield { type: "done" };
+			},
+		};
+		service = await fx.open({ engines: [engine] });
+		const pages = Array.from({ length: 101 }, (_, index) => [`Page ${index + 1} text`]);
+		const [book] = await service.upload([new File([makePdf(pages)], "book.pdf", { type: "application/pdf" })]);
+		const session = await service.createSession({ engine: "fake", text: "read", attachments: [book!.id] });
+		await until(
+			"the turn",
+			async () =>
+				calls.length === 1 &&
+				(await service!.harness.snapshot(AgentDoc, session.id as never, BACKGROUND))?.run === null,
+		);
+		const [attachment] = calls[0]!.attachments;
+		expect(attachment?.inline).toBeUndefined();
+		expect(attachment?.extracted).toEqual({ pages: 101, truncated: false });
+		expect(attachment?.text).toContain("--- page 101 ---\nPage 101 text");
+
+		const long = await pdfText(makePdf(Array.from({ length: 50 }, () => ["x".repeat(50)])), 200);
+		expect(long.extracted).toEqual({ pages: 50, truncated: true });
+		expect(long.text!.length).toBeLessThanOrEqual(200);
+	});
+
+	test("a bad upload limit is a startup error", () => {
+		expect(() => loadConfig({ TINY_MAX_UPLOAD_MB: "lots" })).toThrow("TINY_MAX_UPLOAD_MB");
+		expect(loadConfig({ TINY_MAX_UPLOAD_MB: "2" }).maxUploadBytes).toBe(2 * 1024 * 1024);
 	});
 });

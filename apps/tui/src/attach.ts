@@ -19,23 +19,55 @@ function run(command: string[]): { ok: boolean; stdout: Uint8Array; text: string
 	}
 }
 
-/** A file on disk, read for upload. */
-export function readLocalFile(path: string): LocalFile {
-	const bytes = readFileSync(path);
-	return { name: basename(path), type: Bun.file(path).type.split(";")[0] || "application/octet-stream", bytes };
+/** A file on disk, read for upload. Throws when it cannot be read, or is bigger than `maxBytes` (checked first). */
+export function readLocalFile(path: string, maxBytes = Number.POSITIVE_INFINITY): LocalFile {
+	const name = basename(path);
+	const size = statSync(path).size;
+	if (size > maxBytes)
+		throw new Error(`${name} is too big (${formatSize(size)}; the limit is ${formatSize(maxBytes)})`);
+	return { name, type: Bun.file(path).type.split(";")[0] || "application/octet-stream", bytes: readFileSync(path) };
+}
+
+/** Read several files; the ones that cannot be read (too big, no permission) are reported, not thrown. */
+export function readLocalFiles(paths: readonly string[], maxBytes?: number): { files: LocalFile[]; errors: string[] } {
+	const files: LocalFile[] = [];
+	const errors: string[] = [];
+	for (const path of paths) {
+		try {
+			files.push(readLocalFile(path, maxBytes));
+		} catch (error) {
+			errors.push(error instanceof Error ? error.message : String(error));
+		}
+	}
+	return { files, errors };
+}
+
+function formatSize(bytes: number): string {
+	return bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`;
 }
 
 /**
  * What the clipboard holds as files: files copied in Finder, else an image (a screenshot, an image copied in a
- * browser). Empty when it holds only text, or the platform's clipboard tools are missing.
+ * browser). Empty when it holds only text, or the platform's clipboard tools are missing. Files that cannot be read
+ * are in `errors`.
  */
-export function readClipboardFiles(): LocalFile[] {
-	if (process.platform === "darwin") return macClipboard();
-	if (process.platform === "linux") return linuxClipboard();
-	return [];
+export function readClipboardFiles(maxBytes?: number): { files: LocalFile[]; errors: string[] } {
+	const found = process.platform === "darwin" ? macClipboard() : process.platform === "linux" ? linuxClipboard() : [];
+	const files: LocalFile[] = [];
+	const errors: string[] = [];
+	for (const item of found) {
+		if (typeof item !== "string") files.push(item);
+		else {
+			const read = readLocalFiles([item], maxBytes);
+			files.push(...read.files);
+			errors.push(...read.errors);
+		}
+	}
+	return { files, errors };
 }
 
-function macClipboard(): LocalFile[] {
+/** Files copied in Finder come back as paths (read later, with the size limit); images as their bytes. */
+function macClipboard(): (LocalFile | string)[] {
 	// Files copied in Finder: their paths.
 	const paths = run([
 		"osascript",
@@ -46,7 +78,7 @@ function macClipboard(): LocalFile[] {
 		.split("\n")
 		.map((line) => line.trim())
 		.filter((path) => path && existsSync(path) && statSync(path).isFile());
-	if (files.length > 0) return files.map(readLocalFile);
+	if (files.length > 0) return files;
 	// An image: written to a temporary PNG by AppleScript, since the clipboard holds it as PNG data.
 	const dir = mkdtempSync(join(tmpdir(), "tiny-paste-"));
 	const target = join(dir, "pasted-image.png");
@@ -63,7 +95,7 @@ function macClipboard(): LocalFile[] {
 	}
 }
 
-function linuxClipboard(): LocalFile[] {
+function linuxClipboard(): (LocalFile | string)[] {
 	const wayland = Boolean(process.env.WAYLAND_DISPLAY);
 	const types = wayland
 		? run(["wl-paste", "--list-types"])
@@ -79,7 +111,7 @@ function linuxClipboard(): LocalFile[] {
 			.filter((line) => line.startsWith("file://"))
 			.map((line) => decodeURIComponent(line.slice("file://".length)))
 			.filter((path) => existsSync(path) && statSync(path).isFile());
-		if (files.length > 0) return files.map(readLocalFile);
+		if (files.length > 0) return files;
 	}
 	const image = offered.find((type) => /^image\/(png|jpeg|gif|webp)$/.test(type));
 	if (!image) return [];

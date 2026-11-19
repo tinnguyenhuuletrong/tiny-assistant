@@ -480,6 +480,8 @@ export class AssistantService {
 	}): Promise<SessionInfo> {
 		const project = input.projectId ? this.db.project(input.projectId) : undefined;
 		if (input.projectId && !project) throw new HttpError(404, "No such project");
+		// Check the files before creating anything, so a stale upload ID leaves no half-made session behind.
+		const firstFiles = this.#resolveUploads(input.attachments ?? []);
 		const engine = input.engine ?? (input.workflow ? PI_ENGINE : this.defaultEngine());
 		const info = this.engineList().find((candidate) => candidate.id === engine);
 		if (!info) throw new HttpError(400, `No engine "${engine}"`);
@@ -524,8 +526,8 @@ export class AssistantService {
 				input.title?.trim() ||
 				(input.text?.trim()
 					? titleFrom(input.text)
-					: input.attachments?.length
-						? titleFrom(`📎 ${this.uploads.resolve(input.attachments)[0]?.name ?? "Files"}`)
+					: firstFiles.length > 0
+						? titleFrom(`📎 ${firstFiles[0]!.name}`)
 						: "New chat"),
 			createdAt: now,
 			updatedAt: now,
@@ -611,6 +613,8 @@ export class AssistantService {
 			try {
 				saved.push(await this.uploads.save(file));
 			} catch (error) {
+				// All or nothing: drop the files of this request already written.
+				for (const upload of saved) this.uploads.discard(upload);
 				throw new HttpError(413, error instanceof Error ? error.message : String(error));
 			}
 		}
@@ -620,11 +624,29 @@ export class AssistantService {
 	}
 
 	/** Attachments prepared for what a session's engine (and, for pi, its model) takes natively. */
-	prepareFor(sessionId: number, attachments: readonly Attachment[]): Promise<PreparedAttachment[]> {
-		if (attachments.length === 0) return Promise.resolve([]);
+	async prepareFor(sessionId: number, attachments: readonly Attachment[]): Promise<PreparedAttachment[]> {
+		if (attachments.length === 0) return [];
 		const session = this.db.session(sessionId);
 		const model = this.modelList.find((candidate) => `${candidate.provider}/${candidate.id}` === session?.model);
-		return prepareAttachments(attachments, this.engines.media(session?.engine ?? PI_ENGINE, model), this.images);
+		try {
+			return await prepareAttachments(
+				attachments,
+				this.engines.media(session?.engine ?? PI_ENGINE, model),
+				this.images,
+			);
+		} catch (error) {
+			// A file that cannot be read now (permissions, disk) still goes out, as its path: the message is never lost.
+			console.warn(`[attachments] session ${sessionId}: ${error}`);
+			return [...attachments];
+		}
+	}
+
+	#resolveUploads(ids: readonly string[]): Attachment[] {
+		try {
+			return this.uploads.resolve(ids);
+		} catch (error) {
+			throw new HttpError(400, error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	async send(
@@ -635,12 +657,7 @@ export class AssistantService {
 		attachmentIds: readonly string[] = [],
 	): Promise<void> {
 		const content = text.trim();
-		let attachments: Attachment[];
-		try {
-			attachments = this.uploads.resolve(attachmentIds);
-		} catch (error) {
-			throw new HttpError(400, error instanceof Error ? error.message : String(error));
-		}
+		const attachments = this.#resolveUploads(attachmentIds);
 		if (!content && attachments.length === 0) throw new HttpError(400, "Empty message");
 		const conversation = await this.#conversation(id);
 		await this.#feed(id); // follow it, so busy state and indexing track the run
@@ -1101,7 +1118,14 @@ export class AssistantService {
 				if (!message) continue;
 				const at = Number(message.timestamp ?? Date.now());
 				if (message.role === "user") {
-					messages.push({ entryId: entry.id, role: "user", text: textOf(message.content), at });
+					// What the user typed, not the attachment notes (paths, file and PDF text) the model also got.
+					const typed = (entry.data as { text?: unknown } | undefined)?.text;
+					messages.push({
+						entryId: entry.id,
+						role: "user",
+						text: typeof typed === "string" ? typed : textOf(message.content),
+						at,
+					});
 				} else if (message.role === "assistant") {
 					const text = textOf(message.content);
 					if (text) {
