@@ -15,6 +15,7 @@
 		"@earendil-works/pi-claude-code": "github:earendil-works/pi-claude-code",
 		"@earendil-works/pi-durable": "1.5.2",
 		"@earendil-works/pi-schema": "1.5.2",
-		"@tiny/core": "workspace:*"
+		"@tiny/core": "workspace:*",
+		"unpdf": "2.2.1"
 	}
 }
