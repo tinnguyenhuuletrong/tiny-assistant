@@ -63,6 +63,19 @@ function permissionMode(value: string | undefined): Config["claude"]["permission
 	return mode;
 }
 
+function chromeSetting(value: string | undefined): boolean | undefined {
+	switch (value?.trim().toLowerCase() || "on") {
+		case "on":
+			return true;
+		case "off":
+			return false;
+		case "settings":
+			return undefined;
+		default:
+			throw new Error("TINY_CLAUDE_CHROME must be on, off, or settings");
+	}
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
 	const webDir = env.TINY_WEB_DIR ? expand(env.TINY_WEB_DIR) : join(repoRoot, "apps/web/dist");
 	return {
@@ -77,7 +90,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		claude: {
 			command: env.TINY_CLAUDE_COMMAND || env.PI_CLAUDE_CODE_COMMAND || "claude",
 			permissionMode: permissionMode(env.TINY_CLAUDE_PERMISSION_MODE),
-			chrome: env.TINY_CLAUDE_CHROME === "settings" ? undefined : env.TINY_CLAUDE_CHROME !== "off",
+			chrome: chromeSetting(env.TINY_CLAUDE_CHROME),
 			useApiKey: env.TINY_CLAUDE_USE_API_KEY === "1",
 		},
 		fsRoots: (list(env.TINY_FS_ROOTS).length > 0 ? list(env.TINY_FS_ROOTS) : ["~"]).map(expand),

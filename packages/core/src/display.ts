@@ -384,8 +384,28 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 	// An engine session (Claude Code, ...): its turn in progress lives in the agent document instead.
 	const agent = docs[AGENT_DOC] as AgentLiveData | undefined;
 	if (agent) {
-		// A call without a result is running while the turn is; after the turn it stays as it was (pending).
-		if (agent.run) for (const tool of tools.values()) if (tool.status === "pending") tool.status = "running";
+		// While a turn runs, its calls without a result are running. Older ones (a stopped turn's) stay pending.
+		if (agent.run) {
+			let turnStart = -1;
+			for (let index = entries.length - 1; index >= 0; index--) {
+				if (entries[index]!.kind === AGENT_ENTRY_KINDS.user) {
+					turnStart = index;
+					break;
+				}
+			}
+			const current: { model?: readonly unknown[] }[] = [
+				...entries.slice(turnStart + 1),
+				...(agent.message ? [{ model: [agent.message] }] : []),
+			];
+			for (const entry of current) {
+				const message = entry.model?.[0] as Msg | undefined;
+				if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+				for (const block of message.content as Msg[]) {
+					const tool = block.type === "toolCall" ? tools.get(String(block.id)) : undefined;
+					if (tool?.status === "pending") tool.status = "running";
+				}
+			}
+		}
 		if (agent.message) {
 			const message = agent.message as Msg;
 			items.push({
@@ -400,7 +420,7 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 				usage: null,
 			});
 		}
-		if (agent.failure && !agent.run) {
+		if (agent.failure && !agent.run && agent.queue.length === 0) {
 			items.push({
 				type: "notice",
 				key: "failure",
@@ -433,14 +453,15 @@ export function failureText(reason: string, detail?: string | null): string {
 export function summarizeLive(docs: ConversationViewValue["docs"]): LiveSummary {
 	const agent = docs[AGENT_DOC] as AgentLiveData | undefined;
 	if (agent) {
+		// A turn sits in the queue until it starts, so a queued one keeps the session busy.
+		const busy = agent.run !== null || agent.queue.length > 0;
 		return {
-			busy: agent.run !== null,
+			busy,
 			generating: agent.message !== null,
 			retry: agent.retry,
 			compacting: false,
-			queued: agent.queue.length,
-			failure:
-				agent.failure && !agent.run ? { reason: agent.failure.reason, detail: agent.failure.detail ?? null } : null,
+			queued: Math.max(0, agent.queue.length - (agent.run ? 0 : 1)),
+			failure: agent.failure && !busy ? { reason: agent.failure.reason, detail: agent.failure.detail ?? null } : null,
 			turns: agent.run?.turns ?? 0,
 		};
 	}

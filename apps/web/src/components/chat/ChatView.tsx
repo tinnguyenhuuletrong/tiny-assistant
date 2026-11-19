@@ -92,7 +92,8 @@ export function ChatView({ sessionId }: { sessionId: number }) {
 
 	const engine = state?.engines.find((item) => item.id === (session?.engine ?? "pi"));
 	const models = modelsForEngine(engine, state?.models ?? []);
-	const modelValue = session?.model ?? state?.defaults.model ?? null;
+	// An engine session without a model runs the engine's own default; pi's default model does not apply.
+	const modelValue = session?.model ?? (engine && engine.id !== "pi" ? null : (state?.defaults.model ?? null));
 	const currentModel = models.find((model) => `${model.provider}/${model.id}` === modelValue);
 	const thinking = session?.thinking ?? state?.defaults.thinking ?? "off";
 

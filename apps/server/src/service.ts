@@ -354,10 +354,11 @@ export class AssistantService {
 		return this.engines.list(this.modelList.length > 0);
 	}
 
-	/** The engine new chats start with: the last one picked, while it is still offered; else pi. */
+	/** The engine new chats start with: the last one picked, while it can still run here; else pi. */
 	defaultEngine(): string {
 		const remembered = this.db.defaultEngine();
-		return remembered && this.engines.has(remembered) ? remembered : PI_ENGINE;
+		const usable = this.engineList().find((engine) => engine.id === remembered && engine.available);
+		return usable ? usable.id : PI_ENGINE;
 	}
 
 	/** The models a session on `engine` may use, as `provider/modelId`. */
@@ -532,6 +533,24 @@ export class AssistantService {
 			row.projectId = project?.id ?? null;
 			row.cwd = project?.path ?? null;
 			agent.cwd = project?.path ?? null;
+			if (session.engine !== PI_ENGINE && row.cwd !== session.cwd) {
+				// Engines keep their sessions per folder (Claude Code under ~/.claude/projects/<cwd>): the old one cannot be
+				// resumed from the new folder, so the next message starts a fresh engine session there.
+				await conversation.commit(async (tx) => {
+					const doc = await tx.doc(AgentDoc, conversation.id);
+					if (doc.run || doc.queue.length > 0) throw new HttpError(409, "Stop the running turn first");
+					if (doc.resume === null) return;
+					doc.resume = null;
+					doc.costSeen = 0;
+					await tx.appendEntry(conversation.id, {
+						kind: AgentNotice.kind,
+						data: {
+							level: "info",
+							text: `Moved to ${project?.name ?? "no project"}: the next message starts a new engine session`,
+						},
+					});
+				}, context);
+			}
 		}
 		if (Object.keys(agent).length > 0) await conversation.configure(agent as never, context);
 		await outsideDurableCommit();
