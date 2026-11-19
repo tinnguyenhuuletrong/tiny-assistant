@@ -26,7 +26,8 @@ sent from the phone appears in the terminal. ([MP4](docs/media/sync-demo.mp4))
   itself (a saga). `ctx.ask()` pauses a run until you answer, for as long as it takes. Every run is drawn live.
 - **Sessions and projects.** Start a chat, point it at a project folder, switch between sessions, search everything.
 - **Images and files.** Paste (Ctrl/Cmd+V), drop, or attach images and files in the web app and the TUI. Each
-  engine gets what it takes natively (Claude Code: images and PDFs) and the path of everything else.
+  engine gets what it takes natively (Claude Code: images and PDFs), text files and PDF text in the message, and the
+  path of everything else.
 - **Pick the engine per chat.** Run a chat on tiny's own durable loop, or on Claude Code itself in the project, with
   your skills, plugins, hooks, MCP servers, and Claude in Chrome. Either way the session is stored, searchable, and
   streamed to every client.
@@ -130,13 +131,16 @@ Attach files to any message, in either engine:
 
 What the model gets depends on the engine. Each engine declares the file types it takes natively (`media.inline`):
 
-| Engine      | Given to the model as content              |
-| ----------- | ------------------------------------------ |
-| Tiny (pi)   | images, when the chat's model takes images |
-| Claude Code | images and PDFs                            |
+| Engine      | Given to the model                                             |
+| ----------- | -------------------------------------------------------------- |
+| Tiny (pi)   | images (when the chat's model takes images); PDFs as their text |
+| Claude Code | images and PDFs                                                |
 
-Every other file still reaches it: small text files (code, CSV, JSON, ...; up to 64 KB) are included in the message,
-and every file is listed with its path on the daemon's machine, so the engine's tools can open it. Images are resized
+Every other file still reaches it. Small text files (Markdown, code, CSV, JSON, ...; up to 64 KB) are included in the
+message, and so is the text of a PDF the engine does not take natively: pi-ai messages carry only text and images, so a
+Tiny chat reads PDFs this way, with any model (page by page, up to 100,000 characters). A scanned PDF has no text to
+extract, and the model is told so. Every file is also listed with its path on the daemon's machine, so the engine's
+tools can open it. Images are resized
 to fit the model's limits (2000×2000, under 5 MB). Files are kept under `~/.tiny-assistant/uploads`; the limit per file
 is `TINY_MAX_UPLOAD_MB` (default 30). A new engine (Codex, Antigravity with video, ...) only declares its
 `media.inline` and builds content from the prepared attachments it is given.
