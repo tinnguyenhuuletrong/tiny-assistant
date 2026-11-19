@@ -10,6 +10,8 @@ await client.loadState();
 const project = await client.createProject({ path: process.cwd() });
 const session = await client.createSession({
 	projectId: project.id,
+	// Tiny's own loop, whatever new chats default to: the prompt uses tiny's `now` tool.
+	engine: "pi",
 	model,
 	text: "Use the `now` tool to get the time in Asia/Ho_Chi_Minh, then run `ls` with bash and tell me how many entries there are. Answer in one short markdown list.",
 });

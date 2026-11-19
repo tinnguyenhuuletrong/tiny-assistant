@@ -405,7 +405,10 @@ function welcome(): string {
 
 function render(): void {
 	const session = current();
-	const model = session?.model ?? draftChoice().model ?? "default model";
+	// An engine session without a model runs the engine's default; the next chat's draft model does not apply.
+	const model = session
+		? (session.model ?? (session.engine === "pi" ? "no model" : "default model"))
+		: (draftChoice().model ?? "default model");
 	const engine = currentEngine();
 	const project = projectName(session ? session.projectId : ui.draftProject);
 	const title = session ? session.title : "New chat";

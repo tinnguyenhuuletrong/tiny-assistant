@@ -249,6 +249,9 @@ export function createAgentTask(engines: EngineRegistry, sessionOf: (sessionId: 
 						break;
 					}
 					case "partial":
+						// A partial after a finished message belongs to the next one (the engine reports a message finished only
+						// when it moves on): commit the held one, so it stays on screen.
+						if (held) await commitHeld();
 						partial = event.message;
 						schedule();
 						break;
@@ -289,10 +292,12 @@ export function createAgentTask(engines: EngineRegistry, sessionOf: (sessionId: 
 						await runtime.commit(async (tx) => {
 							const doc = await tx.doc(AgentDoc, conversationId);
 							let cost = 0;
-							if (event.cumulativeCost !== undefined) {
-								cost =
-									event.cumulativeCost >= doc.costSeen ? event.cumulativeCost - doc.costSeen : event.cumulativeCost;
-								doc.costSeen = event.cumulativeCost;
+							const total = event.cumulativeCost;
+							// A zeroed total (a crash or startup-error result) says nothing: keep the running total, or the next
+							// turn would count the whole session again. A lower nonzero total is a new baseline (`/clear`).
+							if (total !== undefined && total > 0) {
+								cost = total >= doc.costSeen ? total - doc.costSeen : total;
+								doc.costSeen = total;
 							}
 							const turnUsage: UsageData = { ...usage, cost: { ...usage.cost, total: cost } };
 							if (last) {

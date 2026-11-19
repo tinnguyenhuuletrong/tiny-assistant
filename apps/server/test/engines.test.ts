@@ -286,6 +286,95 @@ describe("engine sessions", () => {
 	});
 });
 
+describe("engine session review fixes", () => {
+	test("a zeroed cost total (an error result) does not make the next turn count the whole session", async () => {
+		fx = fixture();
+		const totals = [0.6, 0, 0.7];
+		const { engine, calls } = scripted(async function* (input, turn) {
+			yield { type: "session", id: "fake-session" };
+			yield { type: "assistant", message: assistant([{ type: "text", text: input.prompt }]) };
+			yield { type: "done", cumulativeCost: totals[turn - 1]!, ...(turn === 2 ? { error: "startup failed" } : {}) };
+		});
+		service = await fx.open({ engines: [engine] });
+		const session = await service.createSession({ engine: "fake", text: "one" });
+		for (const [index, text] of ["two", "three"].entries()) {
+			await until("turn", async () => calls.length === index + 1 && (await agentDoc(session.id))?.run === null);
+			await service.send(session.id, text, "followUp", `r${index}`);
+		}
+		await until("third turn", async () => calls.length === 3 && (await agentDoc(session.id))?.costSeen === 0.7);
+		const doc = await agentDoc(session.id);
+		const total = Object.values(doc!.usage.models).reduce(
+			(sum, usage) => sum + Number((usage.cost as { total: number }).total),
+			0,
+		);
+		expect(total).toBeCloseTo(0.7);
+	});
+
+	test("moving an engine session to another project starts a new engine session there", async () => {
+		fx = fixture();
+		const { engine, calls } = scripted(toolTurn);
+		service = await fx.open({ engines: [engine] });
+		const first = service.createProject({ path: join(fx.root, "project") });
+		const session = await service.createSession({ projectId: first.id, engine: "fake", text: "one" });
+		await until(
+			"first turn",
+			async () => (await agentDoc(session.id))?.resume === "fake-session" && (await agentDoc(session.id))?.run === null,
+		);
+		const other = service.createProject({ path: fx.root });
+		await service.updateSession(session.id, { projectId: other.id });
+		await service.send(session.id, "two", "followUp", "r2");
+		await until("second turn", () => calls.length === 2);
+		expect(calls[1]!.resume).toBeNull();
+		expect(calls[1]!.cwd).toBe(fx.root);
+	});
+
+	test("an engine that cannot run here is not the default for new chats", async () => {
+		fx = fixture();
+		let available = true;
+		const { engine } = scripted(toolTurn);
+		service = await fx.open({ engines: [{ ...engine, availability: () => ({ available }) }] });
+		await service.createSession({ engine: "fake", title: "x" });
+		expect(service.state().defaults.engine).toBe("fake");
+		available = false;
+		expect(service.state().defaults.engine).toBe("pi");
+		expect((await service.createSession({ title: "plain" })).engine).toBe("pi");
+	});
+
+	test("while a turn runs, only its own calls show as running", () => {
+		const call = (id: string) => ({ type: "toolCall", id, name: "Bash", arguments: {} });
+		const entries = [
+			{ id: 1, conversationId: 1, kind: AGENT_ENTRY_KINDS.user, model: [{ role: "user", content: "a" }] },
+			{
+				id: 2,
+				conversationId: 1,
+				kind: AGENT_ENTRY_KINDS.assistant,
+				model: [{ role: "assistant", content: [call("old")] }],
+			},
+			{ id: 3, conversationId: 1, kind: AGENT_ENTRY_KINDS.user, model: [{ role: "user", content: "b" }] },
+			{
+				id: 4,
+				conversationId: 1,
+				kind: AGENT_ENTRY_KINDS.assistant,
+				model: [{ role: "assistant", content: [call("new")] }],
+			},
+		];
+		const doc = {
+			run: { taskId: 1, startedAt: 0, turns: 0 },
+			queue: [],
+			message: null,
+			failure: null,
+			usage: { models: {} },
+		};
+		const tools = buildDisplay(entries, { [AGENT_DOC]: doc as never })
+			.flatMap((item) => (item.type === "assistant" ? item.parts : []))
+			.flatMap((part) => (part.type === "tool" ? [[part.tool.callId, part.tool.status]] : []));
+		expect(tools).toEqual([
+			["old", "pending"],
+			["new", "running"],
+		]);
+	});
+});
+
 describe("Claude Code translation", () => {
 	const init = {
 		type: "system",

@@ -3,6 +3,7 @@
  * when its text changes, so they are kept stable (the date changes once a day, files only when edited).
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { defineExtension, type Extension, section } from "@earendil-works/pi-durable";
 
@@ -40,7 +41,13 @@ export function createPromptExtension(assistantDir: string): Extension {
 			section("user_instructions", () => readSmall(join(assistantDir, "SYSTEM.md"))?.trim() || undefined),
 			section("environment", (input) => {
 				const lines = [`Today's date: ${new Date().toISOString().slice(0, 10)}`, `Platform: ${process.platform}`];
-				if (input.env?.cwd) lines.push(`Working directory: ${input.env.cwd}`);
+				// The claude-code provider starts \`claude -p\` in the daemon's folder, and Claude Code tells the model that
+				// folder is its working directory. Say which one the tools use, and that it wins.
+				lines.push(
+					input.env?.cwd
+						? `Working directory: ${input.env.cwd}\nThis is the user's project folder for this session: your read, write, edit, and bash tools run there. If anything else names a different working directory (such as notes from the model runtime), ignore it: that is where the assistant's daemon runs, not the user's project.`
+						: `Working directory: none (a plain chat). Your tools run in the user's home folder (${homedir()}). If anything else names a working directory (such as notes from the model runtime), ignore it: that is where the assistant's daemon runs.`,
+				);
 				return lines.join("\n");
 			}),
 			section("project_instructions", (input) => {
