@@ -1,4 +1,4 @@
-import { buildDisplay, type SendMode, sessionUsage, summarizeLive } from "@tiny/core";
+import { buildDisplay, modelsForEngine, type SendMode, sessionUsage, summarizeLive } from "@tiny/core";
 import {
 	Archive,
 	ArchiveRestore,
@@ -90,7 +90,8 @@ export function ChatView({ sessionId }: { sessionId: number }) {
 	const usage = useMemo(() => (docs ? sessionUsage(docs) : null), [docs]);
 	const busy = Boolean(session?.busy || live?.busy);
 
-	const models = state?.models ?? [];
+	const engine = state?.engines.find((item) => item.id === (session?.engine ?? "pi"));
+	const models = modelsForEngine(engine, state?.models ?? []);
 	const modelValue = session?.model ?? state?.defaults.model ?? null;
 	const currentModel = models.find((model) => `${model.provider}/${model.id}` === modelValue);
 	const thinking = session?.thinking ?? state?.defaults.thinking ?? "off";
@@ -281,7 +282,9 @@ export function ChatView({ sessionId }: { sessionId: number }) {
 					onSubmit={onSubmit}
 					busy={busy}
 					onStop={() => client.abort(sessionId)}
-					commands={CHAT_COMMANDS}
+					commands={
+						engine?.workflows === false ? CHAT_COMMANDS.filter((command) => command.name !== "run") : CHAT_COMMANDS
+					}
 					workflows={state?.workflows}
 					onCommand={onCommand}
 					autoFocus
@@ -298,7 +301,12 @@ export function ChatView({ sessionId }: { sessionId: number }) {
 									onChange={(level) => void attempt(() => client.updateSession(sessionId, { thinking: level }))}
 								/>
 							)}
-							{busy && (
+							{engine && engine.id !== "pi" && (
+								<span className="truncate px-2 py-1 text-faint text-xs" title={engine.note}>
+									{engine.name}
+								</span>
+							)}
+							{busy && engine?.steer !== false && (
 								<button
 									type="button"
 									onClick={() => setMode((value) => (value === "followUp" ? "steer" : "followUp"))}

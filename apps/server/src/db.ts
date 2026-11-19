@@ -61,6 +61,8 @@ const MIGRATIONS: string[] = [
 		text, session_id UNINDEXED, entry_id UNINDEXED, role UNINDEXED, at UNINDEXED,
 		tokenize = 'porter unicode61'
 	);`,
+	// Engines: what runs a session's turns. Sessions from before engines ran on pi.
+	`ALTER TABLE app_sessions ADD COLUMN engine TEXT NOT NULL DEFAULT 'pi';`,
 ];
 
 type SessionRow = {
@@ -77,6 +79,7 @@ type SessionRow = {
 	preview: string | null;
 	workflow: string | null;
 	indexed_entry: number;
+	engine: string;
 };
 
 export type IndexedMessage = { entryId: number; role: "user" | "assistant"; text: string; at: number };
@@ -111,6 +114,38 @@ export class AppDb {
 
 	close(): void {
 		this.#db.close();
+	}
+
+	// ---- settings ----
+
+	meta(key: string): string | undefined {
+		return this.#db.query<{ value: string }, [string]>("SELECT value FROM app_meta WHERE key = ?").get(key)?.value;
+	}
+
+	setMeta(key: string, value: string): void {
+		this.#db
+			.query("INSERT INTO app_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+			.run(key, value);
+	}
+
+	/** The engine new chats preselect: the one the last chat was started with. */
+	defaultEngine(): string | undefined {
+		return this.meta("default_engine");
+	}
+
+	/** The model last used with each engine. */
+	engineModels(): Record<string, string> {
+		try {
+			return JSON.parse(this.meta("engine_models") ?? "{}") as Record<string, string>;
+		} catch {
+			return {};
+		}
+	}
+
+	/** Remember a choice for the next new chat: the engine, and the model used with it. */
+	rememberEngine(engine: string, model: string | null, options: { asDefault: boolean }): void {
+		if (options.asDefault) this.setMeta("default_engine", engine);
+		if (model) this.setMeta("engine_models", JSON.stringify({ ...this.engineModels(), [engine]: model }));
 	}
 
 	// ---- projects ----
@@ -160,6 +195,7 @@ export class AppDb {
 			busy,
 			workflowRunning: false,
 			waitingForInput: false,
+			engine: row.engine,
 			model: row.model,
 			thinking: row.thinking as ThinkingLevel | null,
 			cwd: row.cwd,
@@ -187,8 +223,8 @@ export class AppDb {
 	): void {
 		this.#db
 			.query(
-				`INSERT INTO app_sessions (id, project_id, title, created_at, updated_at, model, thinking, cwd, workflow)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO app_sessions (id, project_id, title, created_at, updated_at, engine, model, thinking, cwd, workflow)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				session.id,
@@ -196,6 +232,7 @@ export class AppDb {
 				session.title,
 				session.createdAt,
 				session.updatedAt,
+				session.engine,
 				session.model,
 				session.thinking,
 				session.cwd,

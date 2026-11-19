@@ -26,8 +26,11 @@ import {
 	type AssistantPart,
 	buildDisplay,
 	type DisplayItem,
+	type EngineInfo,
 	failureText,
+	modelsForEngine,
 	type ProjectInfo,
+	pickEngineDefaults,
 	type SessionInfo,
 	sessionUsage,
 	summarizeLive,
@@ -91,6 +94,8 @@ type UiState = {
 	sessionId: number | null;
 	/** Project for the next new chat. */
 	draftProject: string | null;
+	/** Engine for the next new chat; null: the daemon's remembered default. */
+	draftEngine: string | null;
 	draftModel: string | null;
 	draftThinking: ThinkingLevel;
 	expanded: boolean;
@@ -101,6 +106,7 @@ type UiState = {
 const ui: UiState = {
 	sessionId: null,
 	draftProject: null,
+	draftEngine: null,
 	draftModel: null,
 	draftThinking: "medium",
 	expanded: false,
@@ -117,6 +123,25 @@ function projects(): ProjectInfo[] {
 function current(): SessionInfo | undefined {
 	return sessions().find((session) => session.id === ui.sessionId);
 }
+/** The engine and model the next new chat starts with: the user's picks, else what the daemon remembers. */
+function draftChoice(): { engine: EngineInfo | undefined; model: string | null } {
+	const state = client.state;
+	if (!state) return { engine: undefined, model: ui.draftModel };
+	const preset = pickEngineDefaults(state.engines, state.models, state.defaults, ui.draftEngine);
+	const allowed = modelsForEngine(preset.engine, state.models).map((model) => `${model.provider}/${model.id}`);
+	return {
+		engine: preset.engine,
+		model: ui.draftModel && allowed.includes(ui.draftModel) ? ui.draftModel : preset.model,
+	};
+}
+
+/** The engine of the open session, or of the next new chat. */
+function currentEngine(): EngineInfo | undefined {
+	const session = current();
+	if (!session) return draftChoice().engine;
+	return client.engines().find((engine) => engine.id === session.engine);
+}
+
 function projectName(id: string | null | undefined): string | null {
 	return id ? (projects().find((project) => project.id === id)?.name ?? null) : null;
 }
@@ -290,7 +315,15 @@ class ItemView {
 				break;
 			case "notice":
 				this.container.addChild(
-					new Text(item.level === "error" ? c.red(`✗ ${item.text}`) : c.yellow(`■ ${item.text}`), 1, 1),
+					new Text(
+						item.level === "error"
+							? c.red(`✗ ${item.text}`)
+							: item.level === "warn"
+								? c.yellow(`■ ${item.text}`)
+								: c.dim(`ℹ ${item.text}`),
+						1,
+						1,
+					),
 				);
 				break;
 		}
@@ -352,12 +385,19 @@ tui.setLayoutRoot(
 	]),
 );
 
+function engineLines(): string[] {
+	const engine = draftChoice().engine;
+	if (!engine || client.engines().length < 2) return [];
+	return [`Runs with ${c.bold(engine.name)} ${c.dim("(/engine to change)")}`, c.dim(engine.note)];
+}
+
 function welcome(): string {
 	const project = projectName(ui.draftProject);
 	return [
 		c.bold(c.accent("✻ tiny")) + c.dim(` connected to ${baseUrl}`),
 		"",
 		project ? `New chat in ${c.bold(project)}` : `New chat ${c.dim("(no project, /project to pick one)")}`,
+		...engineLines(),
 		c.dim("Type a message, or /help for commands. ctrl+p switches sessions."),
 		"",
 	].join("\n");
@@ -365,14 +405,14 @@ function welcome(): string {
 
 function render(): void {
 	const session = current();
-	const state = client.state;
-	const model = session?.model ?? ui.draftModel ?? state?.defaults.model ?? "no model";
+	const model = session?.model ?? draftChoice().model ?? "default model";
+	const engine = currentEngine();
 	const project = projectName(session ? session.projectId : ui.draftProject);
 	const title = session ? session.title : "New chat";
 	const conn = client.status === "open" ? c.green("●") : client.status === "connecting" ? c.yellow("●") : c.red("●");
 	header.setText(
 		truncateToWidth(
-			`${conn} ${c.bold(title)}${project ? c.dim(` · ${project}`) : ""}${c.dim(` · ${model.replace(/^claude-code\//, "")}`)}`,
+			`${conn} ${c.bold(title)}${project ? c.dim(` · ${project}`) : ""}${engine && engine.id !== "pi" ? c.dim(` · ${engine.name}`) : ""}${c.dim(` · ${model.replace(/^claude-code\//, "")}`)}`,
 			Math.max(20, (process.stdout.columns ?? 80) - 2),
 		),
 	);
@@ -506,10 +546,12 @@ async function submit(text: string): Promise<void> {
 		return;
 	}
 	if (ui.sessionId === null) {
+		const { engine, model } = draftChoice();
 		const session = await client.createSession({
 			projectId: ui.draftProject,
 			text: trimmed,
-			...(ui.draftModel ? { model: ui.draftModel } : {}),
+			...(engine ? { engine: engine.id } : {}),
+			...(model ? { model } : {}),
 			thinking: ui.draftThinking,
 		});
 		openSession(session.id);
@@ -584,7 +626,7 @@ async function command(line: string): Promise<void> {
 	switch (name) {
 		case "help":
 			notify(
-				"/new /sessions /project [path] /model /thinking <lvl> /run <wf> [json] /answer /rename /archive /pin /compact /reset /continue /steer /earlier /quit",
+				"/new /sessions /project [path] /engine /model /thinking <lvl> /run <wf> [json] /answer /rename /archive /pin /compact /reset /continue /steer /earlier /quit",
 			);
 			return;
 		case "new":
@@ -613,9 +655,40 @@ async function command(line: string): Promise<void> {
 				render();
 			});
 			return;
+		case "engine": {
+			const engines = client.engines();
+			const choose = (engine: EngineInfo) => {
+				if (!engine.available) throw new Error(`${engine.name} is not available: ${engine.reason ?? "unknown reason"}`);
+				ui.draftEngine = engine.id;
+				ui.draftModel = null;
+				notify(
+					id !== null
+						? `New chats run with ${engine.name}. This chat keeps its engine: /new to start one.`
+						: `Runs with ${engine.name}`,
+				);
+				render();
+			};
+			const named = arg
+				? engines.find((engine) => engine.id === arg || engine.name.toLowerCase() === arg.toLowerCase())
+				: undefined;
+			if (arg && !named)
+				throw new Error(`No engine "${arg}". Engines: ${engines.map((engine) => engine.id).join(", ")}`);
+			if (named) choose(named);
+			else
+				pick(
+					engines.map((engine) => ({
+						value: engine.id,
+						label: `${engine.id === draftChoice().engine?.id ? "● " : ""}${engine.name}${engine.available ? "" : " (unavailable)"}`,
+						description: engine.available ? engine.note : (engine.reason ?? "not available"),
+					})),
+					(item) => choose(engines.find((engine) => engine.id === item.value)!),
+					"Run new chats with",
+				);
+			return;
+		}
 		case "model":
 			pick(
-				client.models().map((model) => ({
+				modelsForEngine(currentEngine(), client.models()).map((model) => ({
 					value: `${model.provider}/${model.id}`,
 					label: model.name,
 					description: `${model.provider}${model.contextWindow ? ` · ${Math.round(model.contextWindow / 1000)}k` : ""}`,
@@ -732,6 +805,11 @@ async function command(line: string): Promise<void> {
 			void client.send(needSession(), arg || "Continue.", "followUp");
 			return;
 		case "steer":
+			if (currentEngine()?.steer === false) {
+				notify(`${currentEngine()!.name} takes no steering: messages sent mid-turn run next`);
+				if (arg) void client.send(needSession(), arg, "followUp");
+				return;
+			}
 			if (arg) void client.send(needSession(), arg, "steer");
 			else {
 				steerNext = true;
@@ -757,6 +835,16 @@ const commands: SlashCommand[] = [
 	{ name: "new", description: "Start a new chat", argumentHint: "[project]" },
 	{ name: "sessions", description: "Switch session" },
 	{ name: "project", description: "Pick or add a project folder", argumentHint: "[path]" },
+	{
+		name: "engine",
+		description: "What runs new chats: tiny, Claude Code, ...",
+		argumentHint: "[engine]",
+		getArgumentCompletions: (prefix) =>
+			client
+				.engines()
+				.filter((engine) => engine.id.startsWith(prefix))
+				.map((engine) => ({ value: engine.id, label: engine.name, description: engine.note })),
+	},
 	{ name: "model", description: "Change model" },
 	{ name: "thinking", description: "Thinking level", argumentHint: "off|low|medium|high|xhigh" },
 	{

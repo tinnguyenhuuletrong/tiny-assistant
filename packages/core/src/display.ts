@@ -3,6 +3,10 @@
  * show exactly the same thing. Pure functions over JSON: safe in browsers.
  */
 import {
+	AGENT_DOC,
+	AGENT_ENTRY_KINDS,
+	type AgentLiveData,
+	type AgentNoticeData,
 	type ConversationViewValue,
 	ENTRY_KINDS,
 	type ViewEntry,
@@ -76,7 +80,8 @@ export type DisplayItem =
 	| { type: "workflow"; key: string; entryId: number; event: WorkflowEvent }
 	/** A whole run, shown where it started and updated as its entries arrive. */
 	| { type: "workflow-run"; key: string; entryId: number; run: WorkflowRun }
-	| { type: "notice"; key: string; level: "info" | "warn" | "error"; text: string };
+	/** `resumable`: a run ended without an answer, and a message continues it. Otherwise just something to know. */
+	| { type: "notice"; key: string; level: "info" | "warn" | "error"; text: string; resumable: boolean };
 
 export type WorkflowEvent =
 	| ({ kind: "started" } & WorkflowStartedData)
@@ -191,7 +196,7 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 
 	// Tool results first, so calls render with their results attached wherever they are.
 	for (const entry of entries) {
-		if (entry.kind !== "pi.tool-result") continue;
+		if (entry.kind !== "pi.tool-result" && entry.kind !== AGENT_ENTRY_KINDS.toolResult) continue;
 		const message = entry.model?.[0] as Msg | undefined;
 		if (!message) continue;
 		const callId = String(message.toolCallId);
@@ -206,10 +211,17 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 	}
 
 	for (const entry of entries) {
-		if (HIDDEN.has(entry.kind) || entry.kind === "pi.tool-result") continue;
+		if (HIDDEN.has(entry.kind) || entry.kind === "pi.tool-result" || entry.kind === AGENT_ENTRY_KINDS.toolResult)
+			continue;
 		const key = `e${entry.id}`;
 		const message = entry.model?.[0] as Msg | undefined;
 		switch (entry.kind) {
+			case AGENT_ENTRY_KINDS.notice: {
+				const data = entry.data as AgentNoticeData;
+				items.push({ type: "notice", key, level: data.level, text: data.text, resumable: false });
+				break;
+			}
+			case AGENT_ENTRY_KINDS.assistant:
 			case "pi.assistant": {
 				if (!message) break;
 				items.push({
@@ -365,7 +377,38 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 			key: "failure",
 			level: failure.reason === "aborted" ? "warn" : "error",
 			text: failureText(failure.reason, failure.detail),
+			resumable: true,
 		});
+	}
+
+	// An engine session (Claude Code, ...): its turn in progress lives in the agent document instead.
+	const agent = docs[AGENT_DOC] as AgentLiveData | undefined;
+	if (agent) {
+		// A call without a result is running while the turn is; after the turn it stays as it was (pending).
+		if (agent.run) for (const tool of tools.values()) if (tool.status === "pending") tool.status = "running";
+		if (agent.message) {
+			const message = agent.message as Msg;
+			items.push({
+				type: "assistant",
+				key: "live",
+				entryId: null,
+				parts: assistantParts(message, tools),
+				model: message.model ? String(message.model) : null,
+				streaming: true,
+				error: null,
+				stopReason: null,
+				usage: null,
+			});
+		}
+		if (agent.failure && !agent.run) {
+			items.push({
+				type: "notice",
+				key: "failure",
+				level: agent.failure.reason === "aborted" ? "warn" : "error",
+				text: failureText(agent.failure.reason, agent.failure.detail),
+				resumable: true,
+			});
+		}
 	}
 	return items;
 }
@@ -388,6 +431,19 @@ export function failureText(reason: string, detail?: string | null): string {
 }
 
 export function summarizeLive(docs: ConversationViewValue["docs"]): LiveSummary {
+	const agent = docs[AGENT_DOC] as AgentLiveData | undefined;
+	if (agent) {
+		return {
+			busy: agent.run !== null,
+			generating: agent.message !== null,
+			retry: agent.retry,
+			compacting: false,
+			queued: agent.queue.length,
+			failure:
+				agent.failure && !agent.run ? { reason: agent.failure.reason, detail: agent.failure.detail ?? null } : null,
+			turns: agent.run?.turns ?? 0,
+		};
+	}
 	const live = (docs["pi.live"] ?? {}) as Record<string, unknown>;
 	const run = live.run as { turns?: number } | undefined;
 	const generation = live.generation as { retry?: { at: number; error: string } } | undefined;
@@ -407,8 +463,9 @@ export function summarizeLive(docs: ConversationViewValue["docs"]): LiveSummary 
 /** Total spend of a session, from its `pi.usage` document. */
 export function sessionUsage(docs: ConversationViewValue["docs"]): UsageInfo {
 	const usage = (docs["pi.usage"] ?? {}) as { models?: Record<string, Record<string, unknown>> };
+	const agent = docs[AGENT_DOC] as AgentLiveData | undefined;
 	const total: UsageInfo = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-	for (const value of Object.values(usage.models ?? {})) {
+	for (const value of [...Object.values(usage.models ?? {}), ...Object.values(agent?.usage.models ?? {})]) {
 		const u = usageOf({ usage: value });
 		if (!u) continue;
 		total.input += u.input;
@@ -428,4 +485,39 @@ export function toolSummary(tool: ToolState): string {
 	if (value !== undefined) return value.split("\n")[0]!.slice(0, 160);
 	const json = JSON.stringify(args);
 	return json === "{}" ? "" : json.slice(0, 160);
+}
+
+/** The models an engine can run, from the daemon's model list. */
+export function modelsForEngine<M extends { provider: string }>(
+	engine: { modelProviders?: string[] } | undefined,
+	models: readonly M[],
+): M[] {
+	const providers = engine?.modelProviders;
+	return providers ? models.filter((model) => providers.includes(model.provider)) : [...models];
+}
+
+/**
+ * What a new chat preselects: the remembered engine when it can run, else the first engine that can; and the model
+ * last used with it, else the daemon's default model when that engine runs it, else its first model.
+ */
+export function pickEngineDefaults<
+	E extends { id: string; available: boolean; modelProviders?: string[] },
+	M extends { provider: string; id: string },
+>(
+	engines: readonly E[],
+	models: readonly M[],
+	defaults: { model: string | null; engine: string; engineModels: Record<string, string> },
+	chosenEngine?: string | null,
+): { engine: E | undefined; model: string | null } {
+	const usable = (id: string | null | undefined) =>
+		id ? engines.find((engine) => engine.id === id && engine.available) : undefined;
+	const engine = usable(chosenEngine) ?? usable(defaults.engine) ?? engines.find((candidate) => candidate.available);
+	const keys = modelsForEngine(engine, models).map((model) => `${model.provider}/${model.id}`);
+	const remembered = engine ? defaults.engineModels[engine.id] : undefined;
+	const model =
+		(remembered && keys.includes(remembered) ? remembered : undefined) ??
+		(defaults.model && keys.includes(defaults.model) ? defaults.model : undefined) ??
+		keys[0] ??
+		null;
+	return { engine, model };
 }

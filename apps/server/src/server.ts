@@ -347,6 +347,7 @@ export function startServer(service: AssistantService): Server<SocketData> {
 			workflows: service.workflows.list(),
 			tools: service.tools(),
 			models: service.modelList,
+			engines: service.engineList(),
 		};
 		server.publish(ALL, JSON.stringify(message));
 	});

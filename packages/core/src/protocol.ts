@@ -53,6 +53,8 @@ export type SessionInfo = {
 	workflowRunning: boolean;
 	/** A workflow in this session is waiting for the user to answer a question. */
 	waitingForInput: boolean;
+	/** The engine that runs the session's turns (`pi`, `claude-code`, ...). Fixed when the session is created. */
+	engine: string;
 	/** `provider/modelId` the session runs with. */
 	model: string | null;
 	thinking: ThinkingLevel | null;
@@ -88,13 +90,42 @@ export type ToolInfo = {
 	source: string;
 };
 
+/**
+ * An engine runs a session's turns. `pi` is tiny's own durable agent loop (pi-durable runs every model turn and tool
+ * call). The others run an external coding agent (Claude Code today; Codex and others later) in the project folder,
+ * with its own tools, skills, MCP servers, and settings, while tiny records the turn into the session's transcript.
+ */
+export type EngineInfo = {
+	id: string;
+	name: string;
+	/** One or two sentences for the picker: what this engine does and what it can reach. */
+	note: string;
+	/** Can run turns on this machine now. */
+	available: boolean;
+	/** Why not, when it is unavailable. */
+	reason?: string;
+	/** Model providers whose models this engine runs; absent: every provider. */
+	modelProviders?: string[];
+	/** Steering a running turn is supported; otherwise a message sent mid-turn waits for the next turn. */
+	steer: boolean;
+	/** `/compact` is supported. */
+	compact: boolean;
+	/** Workflows can run in its sessions. */
+	workflows: boolean;
+};
+
 export type ServerState = {
 	projects: ProjectInfo[];
 	sessions: SessionInfo[];
 	models: ModelInfo[];
+	engines: EngineInfo[];
 	workflows: WorkflowInfo[];
 	tools: ToolInfo[];
-	defaults: { model: string | null; thinking: ThinkingLevel };
+	/**
+	 * `engine` is the one new chats preselect: the last engine a chat was started with, when still available.
+	 * `engineModels` holds the model last used with each engine.
+	 */
+	defaults: { model: string | null; thinking: ThinkingLevel; engine: string; engineModels: Record<string, string> };
 	version: string;
 };
 
@@ -151,7 +182,7 @@ export type ServerMessage =
 	| { t: "ops"; sessionId: number; ops: DeltaOp[] }
 	| { t: "ended"; sessionId: number; reason: string }
 	| { t: "error"; message: string; sessionId?: number }
-	| { t: "registry"; workflows: WorkflowInfo[]; tools: ToolInfo[]; models: ModelInfo[] }
+	| { t: "registry"; workflows: WorkflowInfo[]; tools: ToolInfo[]; models: ModelInfo[]; engines: EngineInfo[] }
 	| { t: "pong" };
 
 /** Custom entry kinds written by the assistant (never `pi.*`). */
@@ -163,6 +194,44 @@ export const ENTRY_KINDS = {
 	workflowAsk: "tiny.workflow.ask",
 	workflowFinished: "tiny.workflow.finished",
 } as const;
+
+/**
+ * Entries an engine turn writes. Each carries its message in pi-ai's shape in `model`, like `pi.user`,
+ * `pi.assistant`, and `pi.tool-result`, so the display, search, and metrics treat both kinds of sessions alike.
+ */
+export const AGENT_ENTRY_KINDS = {
+	user: "tiny.agent.user",
+	assistant: "tiny.agent.assistant",
+	toolResult: "tiny.agent.tool-result",
+	/** Something the engine reported that is not a message: loaded MCP servers, a compaction. */
+	notice: "tiny.agent.notice",
+} as const;
+
+export type AgentNoticeData = { level: "info" | "warn" | "error"; text: string };
+
+/** The view document that carries an engine session's live state, beside pi-durable's `pi.live`. */
+export const AGENT_DOC = "tiny.agent";
+
+export type AgentLiveData = {
+	engine: string;
+	/** The engine's own session handle, used to resume its context on the next turn. */
+	resume: string | null;
+	/** The turn in progress. */
+	run: { taskId: number; startedAt: number; turns: number } | null;
+	/** Turns waiting for the running one to finish, oldest first. */
+	queue: number[];
+	/** The assistant message being written: completed blocks and the one streaming in. */
+	message: { [key: string]: JsonLike } | null;
+	retry: { at: number; error: string } | null;
+	/** Why the last turn ended without an answer, until the next one starts. */
+	failure: { reason: string; detail?: string } | null;
+	/** Spend per `provider/model`, in pi-ai's usage shape, like `pi.usage`. */
+	usage: { models: { [key: string]: { [key: string]: JsonLike } } };
+	/** Running total the engine reports (Claude Code reports cost cumulatively per session). */
+	costSeen: number;
+	/** Recent request IDs, so a resent message is not run twice. */
+	requests: string[];
+};
 
 export type WorkflowStartedData = { runId: number; name: string; input: JsonLike };
 export type WorkflowStepData = {

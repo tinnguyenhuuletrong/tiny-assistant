@@ -8,6 +8,7 @@ import type {
 	ClientMessage,
 	ConversationViewValue,
 	DirListing,
+	EngineInfo,
 	ModelInfo,
 	ProjectInfo,
 	RunStat,
@@ -182,7 +183,13 @@ export class AssistantClient {
 				break;
 			case "registry":
 				if (this.state) {
-					this.state = { ...this.state, workflows: message.workflows, tools: message.tools, models: message.models };
+					this.state = {
+						...this.state,
+						workflows: message.workflows,
+						tools: message.tools,
+						models: message.models,
+						engines: message.engines,
+					};
 				}
 				break;
 			case "view": {
@@ -342,9 +349,14 @@ export class AssistantClient {
 		return this.#request("DELETE", `/api/projects/${encodeURIComponent(id)}`);
 	}
 
+	/**
+	 * Start a session. `engine` picks what runs its turns (see `EngineInfo`); omitted, the daemon's default. The engine
+	 * and model a session starts with become the defaults new chats preselect.
+	 */
 	createSession(input: {
 		projectId?: string | null;
 		title?: string;
+		engine?: string;
 		model?: string;
 		thinking?: ThinkingLevel;
 		text?: string;
@@ -404,6 +416,10 @@ export class AssistantClient {
 
 	models(): ModelInfo[] {
 		return this.state?.models ?? [];
+	}
+
+	engines(): EngineInfo[] {
+		return this.state?.engines ?? [];
 	}
 
 	workflows(): WorkflowInfo[] {

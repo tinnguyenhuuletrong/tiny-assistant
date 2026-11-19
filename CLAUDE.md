@@ -8,7 +8,9 @@
     (`client.ts`), and the tool/workflow authoring API (`define.ts`, server-side only).
   - `apps/server`: the daemon. `service.ts` owns the pi-durable Harness, sessions, live feeds, indexing;
     `server.ts` is REST + WebSocket; `workflows.ts` is the workflow engine (one durable task per run, steps memoized
-    with `runtime.memo`); `loader.ts` hot-reloads `assistant/`.
+    with `runtime.memo`); `loader.ts` hot-reloads `assistant/`. `engines/` holds the engines other than pi (Claude Code
+    via the Agent SDK); `agent.ts` runs their turns as durable tasks and records them as entries plus the `tiny.agent`
+    live document, which the feed merges into the view.
   - `apps/web`: React + Vite + Tailwind client. `apps/tui`: pi-tui client.
   - `assistant/`: user tools and workflows (examples).
 - Every client change to the API goes through `protocol.ts` + `client.ts` first, so the web app and the TUI stay in
