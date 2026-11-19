@@ -1,9 +1,11 @@
-import type { WorkflowInfo } from "@tiny/core";
+import type { AttachmentInfo, MediaSupport, WorkflowInfo } from "@tiny/core";
 import { ArrowUp, Square } from "lucide-react";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "../../lib/format.ts";
 import { useCoarsePointer } from "../../lib/media.ts";
 import { KEYS, load, save } from "../../lib/storage.ts";
+import { toast } from "../../lib/toast.ts";
+import { AttachButton, PendingFiles, usePendingFiles } from "./Attachments.tsx";
 
 export type SlashCommand = { name: string; description: string; argHint?: string };
 
@@ -13,8 +15,10 @@ type Props = {
 	/** Unsent text is kept per scope in localStorage. */
 	draftKey: string;
 	placeholder: string;
-	/** Return `false` to keep the text (e.g. the request failed). */
-	onSubmit: (text: string) => unknown;
+	/** Return `false` to keep the text and files (e.g. the request failed). */
+	onSubmit: (text: string, attachments: AttachmentInfo[]) => unknown;
+	/** What the engine takes besides text; absent: no attachments. */
+	media?: MediaSupport;
 	busy?: boolean;
 	onStop?: () => void;
 	commands?: SlashCommand[];
@@ -33,6 +37,7 @@ export function Composer({
 	draftKey,
 	placeholder,
 	onSubmit,
+	media,
 	busy,
 	onStop,
 	commands = [],
@@ -50,6 +55,8 @@ export function Composer({
 	const [dismissed, setDismissed] = useState<string | null>(null);
 	const ref = useRef<HTMLTextAreaElement>(null);
 	const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+	const pending = usePendingFiles(media);
+	const [dragging, setDragging] = useState(false);
 
 	useEffect(() => {
 		clearTimeout(saveTimer.current);
@@ -120,17 +127,53 @@ export function Composer({
 
 	const submit = async () => {
 		const text = value.trim();
-		if (!text || submitting) return;
-		if (onCommand && text.startsWith("/")) {
+		const attachments = pending.ready;
+		if ((!text && attachments.length === 0) || submitting || pending.uploading) return;
+		if (pending.files.some((file) => file.status === "error")) {
+			toast("Remove the files that failed to upload first");
+			return;
+		}
+		if (onCommand && text.startsWith("/") && pending.files.length === 0) {
 			const [, name = "", arg = ""] = /^\/(\S+)\s*([\s\S]*)$/.exec(text) ?? [];
 			if (commands.some((command) => command.name === name)) {
 				runCommand(name, arg.trim());
 				return;
 			}
 		}
-		const result = await onSubmit(text);
-		if (result !== false) clear();
+		const result = await onSubmit(text, attachments);
+		if (result !== false) {
+			clear();
+			pending.clear();
+		}
 	};
+
+	/** Ctrl/Cmd+V with an image or files on the clipboard attaches them; plain text pastes as usual. */
+	const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+		if (!media) return;
+		const files = Array.from(event.clipboardData.files);
+		if (files.length === 0) return;
+		event.preventDefault();
+		pending.add(files);
+	};
+
+	const dropProps = media
+		? {
+				onDragOver: (event: React.DragEvent) => {
+					if (!event.dataTransfer.types.includes("Files")) return;
+					event.preventDefault();
+					setDragging(true);
+				},
+				onDragLeave: (event: React.DragEvent) => {
+					if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
+				},
+				onDrop: (event: React.DragEvent) => {
+					if (!event.dataTransfer.types.includes("Files")) return;
+					event.preventDefault();
+					setDragging(false);
+					pending.add(Array.from(event.dataTransfer.files));
+				},
+			}
+		: {};
 
 	const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
 		if (event.nativeEvent.isComposing) return;
@@ -158,7 +201,11 @@ export function Composer({
 		}
 	};
 
-	const canSend = value.trim().length > 0 && !submitting;
+	const canSend =
+		(value.trim().length > 0 || pending.ready.length > 0) &&
+		!submitting &&
+		!pending.uploading &&
+		!pending.files.some((file) => file.status === "error");
 
 	return (
 		<div className={cn("relative mx-auto w-full max-w-3xl", className)}>
@@ -183,8 +230,15 @@ export function Composer({
 					))}
 				</div>
 			)}
-			<div className="rounded-2xl border border-border bg-surface shadow-black/5 shadow-sm transition focus-within:border-border-strong">
+			<div
+				{...dropProps}
+				className={cn(
+					"rounded-2xl border border-border bg-surface shadow-black/5 shadow-sm transition focus-within:border-border-strong",
+					dragging && "border-accent ring-2 ring-accent/30",
+				)}
+			>
 				{header}
+				<PendingFiles files={pending.files} onRemove={pending.remove} />
 				<textarea
 					ref={ref}
 					value={value}
@@ -195,10 +249,12 @@ export function Composer({
 						setActive(0);
 					}}
 					onKeyDown={onKeyDown}
+					onPaste={onPaste}
 					enterKeyHint={coarse ? "enter" : "send"}
 					className="scrollbar-thin block max-h-[40vh] w-full resize-none bg-transparent px-4 pt-3.5 pb-1.5 text-base leading-relaxed outline-none placeholder:text-faint"
 				/>
 				<div className="flex items-center gap-1 px-2 pb-2">
+					{media && <AttachButton media={media} onFiles={pending.add} />}
 					<div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">{toolbar}</div>
 					{busy && onStop && (
 						<button

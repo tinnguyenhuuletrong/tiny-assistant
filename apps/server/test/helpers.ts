@@ -29,6 +29,7 @@ export function fixture(): Fixture {
 		webDir: undefined,
 		providers: [],
 		defaultModel: undefined,
+		maxUploadBytes: 5 * 1024 * 1024,
 		engines: [],
 		claude: { command: "claude", permissionMode: "bypassPermissions", chrome: undefined, useApiKey: false },
 		fsRoots: [root],

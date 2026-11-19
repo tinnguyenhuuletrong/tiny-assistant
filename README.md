@@ -25,6 +25,8 @@ sent from the phone appears in the terminal. ([MP4](docs/media/sync-demo.mp4))
 - **Workflows that can undo and ask.** Steps are checkpointed; give them an `undo` and a failed or stopped run reverts
   itself (a saga). `ctx.ask()` pauses a run until you answer, for as long as it takes. Every run is drawn live.
 - **Sessions and projects.** Start a chat, point it at a project folder, switch between sessions, search everything.
+- **Images and files.** Paste (Ctrl/Cmd+V), drop, or attach images and files in the web app and the TUI. Each
+  engine gets what it takes natively (Claude Code: images and PDFs) and the path of everything else.
 - **Pick the engine per chat.** Run a chat on tiny's own durable loop, or on Claude Code itself in the project, with
   your skills, plugins, hooks, MCP servers, and Claude in Chrome. Either way the session is stored, searchable, and
   streamed to every client.
@@ -115,6 +117,29 @@ Claude login: `ANTHROPIC_API_KEY` is dropped unless `TINY_CLAUDE_USE_API_KEY=1`.
 ([`engines/index.ts`](apps/server/src/engines/index.ts)). An engine has an id, a name, a note, the model providers it
 runs, an availability check, and `run(turn)`, which streams `session`, `partial`, `assistant`, `toolResult`, `retry`,
 `notice`, and `done` events. The durable turn task ([`agent.ts`](apps/server/src/agent.ts)) and the clients do the rest.
+
+## Attachments
+
+Attach files to any message, in either engine:
+
+- **Web app.** Paste with Ctrl/Cmd+V (a screenshot, an image copied in a browser, files copied in Finder), drop files
+  on the message box, or use the paperclip. Files upload as soon as you add them; a message can be files alone.
+- **TUI.** Ctrl+V attaches the clipboard's image (or files copied in Finder). Dragging files into the terminal attaches
+  them instead of typing their paths. `/attach <path…>` attaches by path; `/detach` drops them. (Clipboard: macOS
+  through `osascript`, Linux through `wl-paste` or `xclip`.)
+
+What the model gets depends on the engine. Each engine declares the file types it takes natively (`media.inline`):
+
+| Engine      | Given to the model as content              |
+| ----------- | ------------------------------------------ |
+| Tiny (pi)   | images, when the chat's model takes images |
+| Claude Code | images and PDFs                            |
+
+Every other file still reaches it: small text files (code, CSV, JSON, ...; up to 64 KB) are included in the message,
+and every file is listed with its path on the daemon's machine, so the engine's tools can open it. Images are resized
+to fit the model's limits (2000×2000, under 5 MB). Files are kept under `~/.tiny-assistant/uploads`; the limit per file
+is `TINY_MAX_UPLOAD_MB` (default 30). A new engine (Codex, Antigravity with video, ...) only declares its
+`media.inline` and builds content from the prepared attachments it is given.
 
 ## Tools
 
@@ -266,9 +291,11 @@ All clients use `@tiny/core`'s `AssistantClient`. Raw endpoints:
 | `GET /api/state`                                                                          | projects, sessions, models, engines, workflows, tools, defaults                          |
 | `POST /api/projects` `{ path, name? }`                                                    | add a project folder                                                                     |
 | `GET /api/fs?path=`                                                                       | browse folders (within `TINY_FS_ROOTS`)                                                  |
-| `POST /api/sessions` `{ projectId?, engine?, model?, thinking?, text? }`                  | new session, optionally with its first message; remembers its engine and model           |
+| `POST /api/sessions` `{ projectId?, engine?, model?, thinking?, text?, attachments? }`    | new session, optionally with its first message; remembers its engine and model           |
 | `PATCH /api/sessions/:id` `{ title?, model?, thinking?, projectId?, pinned?, archived? }` |                                                                                          |
-| `POST /api/sessions/:id/messages` `{ text, mode? }`                                       | `mode`: `followUp` (default) or `steer`                                                  |
+| `POST /api/sessions/:id/messages` `{ text, mode?, attachments? }`                         | `mode`: `followUp` (default) or `steer`; `attachments`: upload IDs                       |
+| `POST /api/uploads` (multipart, `file` fields)                                            | upload files to attach; returns `{ id, name, mimeType, size }[]`                         |
+| `GET /api/uploads/:id`                                                                    | the file (plain images and PDFs inline, anything else as a download)                     |
 | `POST /api/sessions/:id/abort` · `/compact` · `/reset`                                    |                                                                                          |
 | `GET /api/sessions/:id/entries?before=&limit=`                                            | older transcript pages                                                                   |
 | `POST /api/workflows/run` `{ name, input?, sessionId?, projectId? }`                      |                                                                                          |
@@ -289,6 +316,7 @@ on screen is committed state, so the web app and the TUI can't disagree.
 - `app_sessions`, `app_projects`: what the clients list (each session has its `engine`)
 - `app_runs`: one row per run: model, tokens, cache hits, cost, duration, tool calls, turns
 - `app_tool_calls`: every tool call, with errors
+- `app_uploads`: attached files (the bytes are in `~/.tiny-assistant/uploads/<id>/`)
 - `app_messages_fts`: FTS5 index of user and assistant text
 
 ```sh

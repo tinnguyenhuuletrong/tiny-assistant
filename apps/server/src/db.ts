@@ -4,7 +4,10 @@
  * for later analysis ("which model, how many tokens, how long, which tools").
  */
 import { Database } from "bun:sqlite";
-import type { ProjectInfo, RunStat, SearchHit, SessionInfo, ThinkingLevel } from "@tiny/core/protocol";
+import type { AttachmentInfo, ProjectInfo, RunStat, SearchHit, SessionInfo, ThinkingLevel } from "@tiny/core/protocol";
+
+/** An uploaded file and where its bytes are. */
+export type StoredUpload = AttachmentInfo & { path: string; createdAt: number };
 
 const MIGRATIONS: string[] = [
 	`CREATE TABLE app_projects (
@@ -63,6 +66,15 @@ const MIGRATIONS: string[] = [
 	);`,
 	// Engines: what runs a session's turns. Sessions from before engines ran on pi.
 	`ALTER TABLE app_sessions ADD COLUMN engine TEXT NOT NULL DEFAULT 'pi';`,
+	// Files users attach to messages; the bytes live under <dataDir>/uploads.
+	`CREATE TABLE app_uploads (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		mime_type TEXT NOT NULL,
+		size INTEGER NOT NULL,
+		path TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	);`,
 ];
 
 type SessionRow = {
@@ -340,6 +352,29 @@ export class AppDb {
 				at: row.updated_at,
 			}));
 		return [...titles, ...hits];
+	}
+
+	// ---- uploads ----
+
+	insertUpload(upload: StoredUpload): void {
+		this.#db
+			.query("INSERT INTO app_uploads (id, name, mime_type, size, path, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+			.run(upload.id, upload.name, upload.mimeType, upload.size, upload.path, upload.createdAt);
+	}
+
+	upload(id: string): StoredUpload | undefined {
+		type Row = { id: string; name: string; mime_type: string; size: number; path: string; created_at: number };
+		const row = this.#db.query<Row, [string]>("SELECT * FROM app_uploads WHERE id = ?").get(id);
+		return row
+			? {
+					id: row.id,
+					name: row.name,
+					mimeType: row.mime_type,
+					size: row.size,
+					path: row.path,
+					createdAt: row.created_at,
+				}
+			: undefined;
 	}
 
 	// ---- runs ----

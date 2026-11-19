@@ -32,6 +32,7 @@ import {
 	type AgentNoticeData,
 	type ThinkingLevel,
 } from "@tiny/core/protocol";
+import { type Attachment, attachmentInfo, type PreparedAttachment, userContent } from "./attachments.ts";
 import type { EngineRegistry } from "./engines/index.ts";
 import { type AssistantMessageData, emptyUsage, type ToolResultMessageData, type UsageData } from "./engines/types.ts";
 
@@ -68,7 +69,13 @@ export const AgentNotice = defineEntry<AgentNoticeData>(AGENT_ENTRY_KINDS.notice
 /** What a turn needs to know about its session, read when the turn starts (so model changes apply to the next turn). */
 export type AgentSession = { engine: string; model: string | null; thinking: ThinkingLevel | null; cwd: string | null };
 
-type TurnInput = { prompt: string; after: number | null };
+type TurnInput = { prompt: string; after: number | null; attachments?: Attachment[] };
+
+/** Prepare a turn's attachments for its session's engine (what it takes natively, images resized). */
+export type PrepareAttachments = (
+	sessionId: number,
+	attachments: readonly Attachment[],
+) => Promise<PreparedAttachment[]>;
 type TurnState = { phase: "wait" } | { phase: "start" } | { phase: "run" };
 type Runtime = TaskRuntime<TurnInput, TurnState, JsonValue, object>;
 type Task = RunningTask<TurnInput, TurnState, JsonValue>;
@@ -104,7 +111,11 @@ function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-export function createAgentTask(engines: EngineRegistry, sessionOf: (sessionId: number) => AgentSession | undefined) {
+export function createAgentTask(
+	engines: EngineRegistry,
+	sessionOf: (sessionId: number) => AgentSession | undefined,
+	prepare: PrepareAttachments,
+) {
 	/** End the turn. A failed or stopped turn keeps the message it was writing, marked as such. */
 	const finish = async (task: Task, runtime: Runtime, context: Context, outcome: Outcome) => {
 		const taskId = Number(task.id);
@@ -226,8 +237,10 @@ export function createAgentTask(engines: EngineRegistry, sessionOf: (sessionId: 
 		};
 
 		try {
+			const attachments = await prepare(sessionId, task.input.attachments ?? []);
 			for await (const event of engine.run({
 				prompt: task.input.prompt,
+				attachments,
 				cwd: session.cwd ?? undefined,
 				model,
 				thinking: session.thinking,
@@ -356,6 +369,8 @@ export function createAgentTask(engines: EngineRegistry, sessionOf: (sessionId: 
 			},
 			start: async (task, runtime, context) => {
 				const taskId = Number(task.id);
+				const attachments = task.input.attachments ?? [];
+				const prepared = await prepare(Number(runtime.conversationId), attachments);
 				await runtime.commit(async (tx) => {
 					const doc = await tx.doc(AgentDoc, runtime.conversationId);
 					doc.queue = doc.queue.filter((id) => id !== taskId);
@@ -365,7 +380,14 @@ export function createAgentTask(engines: EngineRegistry, sessionOf: (sessionId: 
 					doc.failure = null;
 					await tx.appendEntry(runtime.conversationId, {
 						kind: AgentUser.kind,
-						model: asModel({ role: "user", content: task.input.prompt, timestamp: runtime.now() }),
+						model: asModel({
+							role: "user",
+							content: userContent(task.input.prompt, prepared) as never,
+							timestamp: runtime.now(),
+						}),
+						...(attachments.length > 0
+							? { data: { text: task.input.prompt, attachments: attachments.map(attachmentInfo) } }
+							: {}),
 					});
 					return { status: "running", checkpoint: { phase: "run" } };
 				}, context);

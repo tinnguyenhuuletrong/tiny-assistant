@@ -34,6 +34,7 @@ export async function availableModels(models: MutableModels): Promise<ModelInfo[
 		name: model.name ?? model.id,
 		reasoning: Boolean((model as { reasoning?: boolean }).reasoning),
 		contextWindow: (model as { contextWindow?: number }).contextWindow,
+		...(Array.isArray((model as { input?: unknown }).input) ? { input: (model as { input: string[] }).input } : {}),
 	}));
 }
 

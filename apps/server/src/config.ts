@@ -15,6 +15,8 @@ export type Config = {
 	providers: string[];
 	/** `provider/modelId` for new sessions; absent: the first available model. */
 	defaultModel: string | undefined;
+	/** Largest file a message may carry (`TINY_MAX_UPLOAD_MB`, default 30 MB). */
+	maxUploadBytes: number;
 	/** Engines offered for new sessions besides `pi` (always on): `claude-code` by default. */
 	engines: string[];
 	/** The Claude Code engine (`claude-code`). */
@@ -86,6 +88,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 		webDir,
 		providers: list(env.TINY_PROVIDERS ?? "claude-code"),
 		defaultModel: env.TINY_DEFAULT_MODEL || undefined,
+		maxUploadBytes: Math.round(Number(env.TINY_MAX_UPLOAD_MB || 30) * 1024 * 1024),
 		engines: list(env.TINY_ENGINES ?? "claude-code"),
 		claude: {
 			command: env.TINY_CLAUDE_COMMAND || env.PI_CLAUDE_CODE_COMMAND || "claude",

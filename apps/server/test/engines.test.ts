@@ -52,6 +52,7 @@ function scripted(script: (input: TurnInput, turn: number) => AsyncIterable<Turn
 		name: "Fake",
 		note: "A scripted engine",
 		modelProviders: ["faux"],
+		media: { inline: ["image/*"] },
 		availability: () => ({ available: true }),
 		run(input) {
 			calls.push(input);

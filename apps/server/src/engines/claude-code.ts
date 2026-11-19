@@ -9,8 +9,17 @@
  */
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { type EffortLevel, type Options, query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { dirname } from "node:path";
+import {
+	type EffortLevel,
+	type Options,
+	query,
+	type SDKMessage,
+	type SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
+import { isImage } from "@tiny/core/media";
 import type { ThinkingLevel } from "@tiny/core/protocol";
+import { INLINE_IMAGE_TYPES, promptWithAttachments } from "../attachments.ts";
 import {
 	type AssistantMessageData,
 	type Engine,
@@ -59,6 +68,8 @@ export function createClaudeCodeEngine(options: ClaudeCodeEngineOptions): Engine
 		name: "Claude Code",
 		note: `Runs Claude Code itself in the project, set up like \`claude\` there: your skills, plugins, hooks, MCP servers, CLAUDE.md${options.chrome === false ? "" : ", and Claude in Chrome"}, with ${permissions}. Its turns are recorded in this session.`,
 		modelProviders: ["claude-code"],
+		// Claude takes images and PDFs as content; anything else reaches it as a path its Read and Bash tools can open.
+		media: { inline: [...INLINE_IMAGE_TYPES, "application/pdf"] },
 		availability() {
 			if (resolveCommand(options.command)) return { available: true };
 			return {
@@ -86,10 +97,14 @@ async function* runTurn(options: ClaudeCodeEngineOptions, input: TurnInput): Asy
 	const stderr: string[] = [];
 
 	const turn = query({
-		prompt: input.prompt,
+		prompt: input.attachments.length > 0 ? userMessage(input) : input.prompt,
 		options: {
 			abortController,
 			cwd: input.cwd ?? homedir(),
+			// Attached files live in tiny's data folder: let Claude Code's tools reach them in any permission mode.
+			...(input.attachments.length > 0
+				? { additionalDirectories: [...new Set(input.attachments.map((attachment) => dirname(attachment.path)))] }
+				: {}),
 			pathToClaudeCodeExecutable: executable,
 			env,
 			extraArgs,
@@ -136,6 +151,33 @@ async function* runTurn(options: ClaudeCodeEngineOptions, input: TurnInput): Asy
 		const tail = stderr.join("").trim().split("\n").slice(-5).join("\n");
 		yield { type: "done", error: `Claude Code ended without a result${tail ? `: ${tail}` : ""}` };
 	}
+}
+
+/**
+ * The turn's message as content blocks: the text (with every file's path), then images and PDFs as Claude takes them.
+ * Sent as streaming input, which ends after this one message, so Claude Code exits when the turn is done.
+ */
+async function* userMessage(input: TurnInput): AsyncGenerator<SDKUserMessage> {
+	const content: unknown[] = [{ type: "text", text: promptWithAttachments(input.prompt, input.attachments) }];
+	for (const attachment of input.attachments) {
+		const inline = attachment.inline;
+		if (!inline) continue;
+		if (isImage(inline.mimeType)) {
+			content.push({ type: "image", source: { type: "base64", media_type: inline.mimeType, data: inline.data } });
+		} else if (inline.mimeType === "application/pdf") {
+			content.push({
+				type: "document",
+				title: attachment.name,
+				source: { type: "base64", media_type: "application/pdf", data: inline.data },
+			});
+		}
+	}
+	yield {
+		type: "user",
+		message: { role: "user", content: content as SDKUserMessage["message"]["content"] },
+		parent_tool_use_id: null,
+		origin: { kind: "human" },
+	};
 }
 
 type Block = TextBlock | ThinkingBlock | ToolCallBlock;

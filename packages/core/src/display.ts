@@ -7,8 +7,10 @@ import {
 	AGENT_ENTRY_KINDS,
 	type AgentLiveData,
 	type AgentNoticeData,
+	type AttachmentInfo,
 	type ConversationViewValue,
 	ENTRY_KINDS,
+	type UserEntryData,
 	type ViewEntry,
 	type WorkflowAskData,
 	type WorkflowFinishedData,
@@ -63,7 +65,17 @@ export type WorkflowRun = {
 };
 
 export type DisplayItem =
-	| { type: "user"; key: string; entryId: number; text: string; images: { mimeType: string; data: string }[] }
+	| {
+			type: "user";
+			key: string;
+			entryId: number;
+			/** What the user typed (without the attachment notes the model also sees). */
+			text: string;
+			/** Images inline in the message, for messages without `attachments` (older ones, workflow prompts). */
+			images: { mimeType: string; data: string }[];
+			/** Files the user attached; show them from `AssistantClient.uploadUrl(id)`. */
+			attachments: AttachmentInfo[];
+	  }
 	| {
 			type: "assistant";
 			key: string;
@@ -332,12 +344,15 @@ export function buildDisplay(entries: readonly ViewEntry[], docs: ConversationVi
 			default: {
 				// pi.user, and inputs submitted with a custom entry kind: anything carrying a user message.
 				if (message?.role === "user") {
+					const data = entry.data as Partial<UserEntryData> | undefined;
+					const attachments = Array.isArray(data?.attachments) ? data.attachments : [];
 					items.push({
 						type: "user",
 						key,
 						entryId: entry.id,
-						text: textOf(message.content),
-						images: imagesOf(message.content),
+						text: typeof data?.text === "string" ? data.text : textOf(message.content),
+						images: attachments.length > 0 ? [] : imagesOf(message.content),
+						attachments,
 					});
 				}
 			}
