@@ -9,6 +9,11 @@ import { AttachButton, PendingFiles, usePendingFiles } from "./Attachments.tsx";
 
 export type SlashCommand = { name: string; description: string; argHint?: string };
 
+/** An image the browser made from clipboard data (no file behind it): named `image.png` and the like. */
+function isClipboardPicture(file: File): boolean {
+	return file.type.startsWith("image/") && /^image\.\w+$/i.test(file.name);
+}
+
 type Suggestion = { id: string; label: string; hint?: string; description: string; apply: () => void };
 
 type Props = {
@@ -152,6 +157,10 @@ export function Composer({
 		if (!media) return;
 		const files = Array.from(event.clipboardData.files);
 		if (files.length === 0) return;
+		// Excel, Numbers, Word, and PowerPoint put a picture of the selection next to its text: that is a text paste.
+		// Their picture is an unnamed clipboard image; files copied in Finder keep their names.
+		const text = event.clipboardData.getData("text/plain");
+		if (text.trim() && files.every((file) => isClipboardPicture(file))) return;
 		event.preventDefault();
 		pending.add(files);
 	};

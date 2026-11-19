@@ -10,12 +10,12 @@
  *   (pi-ai messages carry only text and images, so a Tiny chat reads PDFs this way, with any model);
  * - every file is listed with its path on this machine, so the engine's tools can open the rest.
  */
-import { mkdirSync } from "node:fs";
-import { basename, join } from "node:path";
+import { mkdirSync, rmSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { DEFAULT_IMAGE_LIMITS, type ImageProcessor } from "@earendil-works/pi-durable/tools";
 import { formatBytes, isImage, isInline } from "@tiny/core/media";
 import type { AttachmentInfo, MediaSupport } from "@tiny/core/protocol";
-import { extractText, getDocumentProxy } from "unpdf";
+import { getDocumentProxy } from "unpdf";
 import type { AppDb, StoredUpload } from "./db.ts";
 
 export type Attachment = AttachmentInfo & { path: string };
@@ -39,8 +39,14 @@ const INLINE_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"
 const MAX_INLINE_TEXT = 64 * 1024;
 /** Text extracted from a PDF is included up to this many characters (about 25k tokens); the rest stays in the file. */
 export const MAX_PDF_TEXT = 100_000;
-/** Bigger PDFs are not parsed: their path is enough, and parsing would hold the event loop. */
-const MAX_PDF_BYTES = 50 * 1024 * 1024;
+/** Bigger PDFs are not parsed for their text: their path is enough. */
+const MAX_PDF_BYTES = 100 * 1024 * 1024;
+/**
+ * PDFs go to a model as documents only within the Anthropic API's limits (a 32 MB request, base64 included, and 100
+ * pages); beyond them, as their text.
+ */
+const MAX_INLINE_PDF_BYTES = 20 * 1024 * 1024;
+const MAX_INLINE_PDF_PAGES = 100;
 const TEXT_TYPES = [
 	"application/json",
 	"application/xml",
@@ -95,6 +101,11 @@ export class UploadStore {
 		return { id, name, mimeType, size: file.size, path, createdAt: Date.now() };
 	}
 
+	/** Remove a saved file (an upload request that failed part way). */
+	discard(upload: StoredUpload): void {
+		rmSync(dirname(upload.path), { recursive: true, force: true });
+	}
+
 	/** Resolve upload IDs from a message; unknown IDs are an error. */
 	resolve(ids: readonly string[]): Attachment[] {
 		return ids.map((id) => {
@@ -105,8 +116,20 @@ export class UploadStore {
 	}
 }
 
-/** Prepared images by upload and limits: a turn prepares its attachments twice (its entry, then the engine). */
+/**
+ * Recently prepared images and PDF text, by upload: a turn prepares its attachments twice (its entry, then the engine),
+ * and the next message often carries the same files. Kept small: base64 images are up to ~4.5 MB each.
+ */
+const CACHE_SIZE = 8;
 const prepared = new Map<string, PreparedAttachment["inline"] | null>();
+const extractedPdfs = new Map<string, Pick<PreparedAttachment, "text" | "extracted" | "unreadable">>();
+
+function remember<V>(cache: Map<string, V>, key: string, value: V): V {
+	cache.delete(key);
+	cache.set(key, value);
+	if (cache.size > CACHE_SIZE) cache.delete(cache.keys().next().value!);
+	return value;
+}
 
 async function prepareImage(
 	attachment: Attachment,
@@ -127,38 +150,65 @@ async function prepareImage(
 	} else if (INLINE_IMAGE_TYPES.includes(attachment.mimeType) && bytes.length * 1.34 <= DEFAULT_IMAGE_LIMITS.maxBytes) {
 		result = { data: Buffer.from(bytes).toString("base64"), mimeType: attachment.mimeType };
 	}
-	prepared.set(key, result);
-	if (prepared.size > 64) prepared.delete(prepared.keys().next().value!);
-	return result ?? undefined;
+	return remember(prepared, key, result) ?? undefined;
 }
 
-/** Extracted PDF text by upload: a turn prepares its attachments twice. */
-const extractedPdfs = new Map<string, Pick<PreparedAttachment, "text" | "extracted" | "unreadable">>();
+/** pdf.js may take ownership of the buffer: give it a copy. Verbosity 0 keeps its warnings out of the daemon's log. */
+function openPdf(bytes: Uint8Array) {
+	return getDocumentProxy(new Uint8Array(bytes), { verbosity: 0 });
+}
+
+/** Pages of a PDF, or undefined when it cannot be parsed. */
+async function pdfPages(bytes: Uint8Array): Promise<number | undefined> {
+	try {
+		const document = await openPdf(bytes);
+		const pages = document.numPages;
+		await document.loadingTask.destroy().catch(() => undefined);
+		return pages;
+	} catch {
+		return undefined;
+	}
+}
 
 /**
- * The text of a PDF, page by page, cut at `max` characters. A PDF without text (a scan, only images) or one that cannot
- * be parsed says so in `unreadable`.
+ * The text of a PDF, page by page, cut at `max` characters. Pages are read only until `max` is reached, yielding to the
+ * event loop between pages, so a long PDF neither blocks the daemon nor costs more than the text kept. A PDF without
+ * text (a scan, only images) or one that cannot be parsed says so in `unreadable`.
  */
 export async function pdfText(
 	bytes: Uint8Array,
 	max = MAX_PDF_TEXT,
 ): Promise<Pick<PreparedAttachment, "text" | "extracted" | "unreadable">> {
+	let document: Awaited<ReturnType<typeof openPdf>> | undefined;
 	try {
-		// pdf.js may take ownership of the buffer: give it a copy. Verbosity 0 keeps its warnings out of the daemon's log.
-		const document = await getDocumentProxy(new Uint8Array(bytes), { verbosity: 0 });
-		const { totalPages, text } = await extractText(document, { mergePages: false }).finally(() =>
-			document.loadingTask.destroy().catch(() => undefined),
-		);
-		const pages = text.map((page) => page.replace(/[ \t]+\n/g, "\n").trim());
-		if (pages.every((page) => page.length === 0)) {
-			return { unreadable: `no text layer in ${totalPages} page${totalPages === 1 ? "" : "s"} (a scan?)` };
+		document = await openPdf(bytes);
+		const total = document.numPages;
+		const pages: string[] = [];
+		let length = 0;
+		for (let number = 1; number <= total && length <= max; number++) {
+			const page = await document.getPage(number);
+			const content = await page.getTextContent();
+			const text = content.items
+				.map((item) => ("str" in item ? `${item.str}${item.hasEOL ? "\n" : ""}` : ""))
+				.join("")
+				.replace(/[ \t]+\n/g, "\n")
+				.trim();
+			page.cleanup();
+			pages.push(text);
+			length += text.length + 20;
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+		if (pages.length === total && pages.every((page) => page.length === 0)) {
+			return { unreadable: `no text layer in ${total} page${total === 1 ? "" : "s"} (a scan?)` };
 		}
 		const joined =
-			pages.length === 1 ? pages[0]! : pages.map((page, index) => `--- page ${index + 1} ---\n${page}`).join("\n\n");
-		const truncated = joined.length > max;
-		return { text: truncated ? joined.slice(0, max) : joined, extracted: { pages: totalPages, truncated } };
+			total === 1 ? pages[0]! : pages.map((page, index) => `--- page ${index + 1} ---\n${page}`).join("\n\n");
+		const truncated = joined.length > max || pages.length < total;
+		return { text: joined.slice(0, max), extracted: { pages: total, truncated } };
 	} catch (error) {
 		return { unreadable: `could not be read (${error instanceof Error ? error.message : String(error)})` };
+	} finally {
+		await document?.loadingTask.destroy().catch(() => undefined);
 	}
 }
 
@@ -175,29 +225,35 @@ export async function prepareAttachments(
 			out.push(attachment);
 			continue;
 		}
+		const pdf = attachment.mimeType === "application/pdf";
 		if (isInline(attachment.mimeType, media)) {
 			const bytes = await file.bytes();
 			if (isImage(attachment.mimeType)) {
 				const inline = await prepareImage(attachment, bytes, images);
 				out.push(inline ? { ...attachment, inline } : attachment);
-			} else {
+				continue;
+			}
+			// A PDF goes as a document only within the API's limits; a bigger one goes as its text, like for Tiny.
+			const fits =
+				!pdf || (attachment.size <= MAX_INLINE_PDF_BYTES && ((await pdfPages(bytes)) ?? 0) <= MAX_INLINE_PDF_PAGES);
+			if (fits) {
 				out.push({
 					...attachment,
 					inline: { data: Buffer.from(bytes).toString("base64"), mimeType: attachment.mimeType },
 				});
+				continue;
 			}
-			continue;
 		}
-		if (attachment.mimeType === "application/pdf") {
-			let found = extractedPdfs.get(attachment.id);
-			if (!found) {
-				found =
+		if (pdf) {
+			const found =
+				extractedPdfs.get(attachment.id) ??
+				remember(
+					extractedPdfs,
+					attachment.id,
 					attachment.size <= MAX_PDF_BYTES
 						? await pdfText(await file.bytes())
-						: { unreadable: "too big to extract its text here" };
-				extractedPdfs.set(attachment.id, found);
-				if (extractedPdfs.size > 32) extractedPdfs.delete(extractedPdfs.keys().next().value!);
-			}
+						: { unreadable: "too big to extract its text here" },
+				);
 			out.push({ ...attachment, ...found });
 			continue;
 		}

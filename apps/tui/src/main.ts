@@ -43,7 +43,7 @@ import {
 	type WorkflowRun,
 	type WorkflowStepStatus,
 } from "@tiny/core";
-import { type LocalFile, pastedPaths, readClipboardFiles, readLocalFile } from "./attach.ts";
+import { type LocalFile, pastedPaths, readClipboardFiles, readLocalFiles } from "./attach.ts";
 import { c, editorTheme, markdownTheme, selectListTheme } from "./theme.ts";
 
 // ---- arguments ----
@@ -578,25 +578,46 @@ async function attach(files: LocalFile[]): Promise<void> {
 	if (fitting.length === 0) return;
 	ui.uploading += fitting.length;
 	render();
-	try {
-		const uploaded = await client.upload(
-			fitting.map((file) => new File([file.bytes as Uint8Array<ArrayBuffer>], file.name, { type: file.type })),
-		);
-		ui.pending.push(...uploaded);
-		notify(`Attached ${uploaded.map((file) => file.name).join(", ")}`);
-	} catch (error) {
-		notify(`Upload failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-	} finally {
-		ui.uploading -= fitting.length;
-		render();
+	// One request per file, so a few big files never exceed the daemon's request size together.
+	const attached: string[] = [];
+	for (const file of fitting) {
+		try {
+			const [uploaded] = await client.upload([
+				new File([file.bytes as Uint8Array<ArrayBuffer>], file.name, { type: file.type }),
+			]);
+			if (uploaded) {
+				ui.pending.push(uploaded);
+				attached.push(uploaded.name);
+			}
+		} catch (error) {
+			notify(`Upload of ${file.name} failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+		} finally {
+			ui.uploading--;
+			render();
+		}
 	}
+	if (attached.length > 0) notify(`Attached ${attached.join(", ")}`);
+}
+
+/** Read files from paths (dragged in or given to /attach) and attach them; unreadable ones are reported. */
+function attachPaths(paths: readonly string[]): void {
+	const { files, errors } = readLocalFiles(paths, currentEngine()?.media.maxFileBytes);
+	if (errors.length > 0) notify(errors.join("; "), "error");
+	void attach(files);
 }
 
 /** Ctrl+V: attach the image or the files on the clipboard. */
 function pasteFromClipboard(): boolean {
-	const files = readClipboardFiles();
-	if (files.length === 0) return false;
-	void attach(files);
+	let found: ReturnType<typeof readClipboardFiles>;
+	try {
+		found = readClipboardFiles(currentEngine()?.media.maxFileBytes);
+	} catch (error) {
+		notify(`Could not read the clipboard: ${error instanceof Error ? error.message : String(error)}`, "error");
+		return true;
+	}
+	if (found.errors.length > 0) notify(found.errors.join("; "), "error");
+	if (found.files.length === 0) return found.errors.length > 0;
+	void attach(found.files);
 	return true;
 }
 
@@ -904,7 +925,7 @@ async function command(line: string): Promise<void> {
 						.join(" "),
 				);
 			if (!paths) throw new Error(`Not a file: ${arg}`);
-			await attach(paths.map(readLocalFile));
+			attachPaths(paths);
 			return;
 		}
 		case "detach":
@@ -1028,7 +1049,7 @@ tui.addInputListener((data) => {
 	if (paste) {
 		const paths = pastedPaths(paste[1]!);
 		if (paths) {
-			void attach(paths.map(readLocalFile));
+			attachPaths(paths);
 			return { consume: true };
 		}
 	}

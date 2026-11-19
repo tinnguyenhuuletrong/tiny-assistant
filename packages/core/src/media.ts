@@ -17,6 +17,13 @@ export function isInline(mimeType: string, media: MediaSupport | undefined): boo
 	return media ? mimeMatches(mimeType, media.inline) : false;
 }
 
+/** Types the daemon serves inline (shown in the page); every other upload is served as a download. */
+export const VIEWABLE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"];
+
+export function isViewable(mimeType: string): boolean {
+	return VIEWABLE_TYPES.includes(mimeType.toLowerCase().split(";")[0]!.trim());
+}
+
 export function isImage(mimeType: string): boolean {
 	return mimeType.toLowerCase().startsWith("image/");
 }
