@@ -292,6 +292,23 @@ function WorkflowRow({ event }: { event: WorkflowEvent }) {
 // ---- notice ----
 
 function Notice({ item, sessionId }: { item: Extract<DisplayItem, { type: "notice" }>; sessionId: number }) {
+	if (!item.resumable) {
+		return (
+			<div
+				className={cn(
+					"flex items-start gap-2 px-1 text-xs leading-relaxed",
+					item.level === "info" ? "text-faint" : item.level === "warn" ? "text-warn" : "text-danger",
+				)}
+			>
+				{item.level === "info" ? (
+					<Info className="mt-0.5 size-3.5 shrink-0" />
+				) : (
+					<TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+				)}
+				<p className="min-w-0 break-words">{item.text}</p>
+			</div>
+		);
+	}
 	const tone =
 		item.level === "error"
 			? "border-danger/30 bg-danger/5"
@@ -399,7 +416,7 @@ function sameItem(prev: Props, next: Props): boolean {
 		}
 		case "notice": {
 			const y = b as typeof a;
-			return a.text === y.text && a.level === y.level;
+			return a.text === y.text && a.level === y.level && a.resumable === y.resumable;
 		}
 		case "workflow-run":
 			// A run's card changes as its later entries arrive.

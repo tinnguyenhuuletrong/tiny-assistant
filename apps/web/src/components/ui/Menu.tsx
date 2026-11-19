@@ -9,6 +9,8 @@ export type MenuItem =
 			label: string;
 			icon?: ReactNode;
 			hint?: string;
+			/** A second, muted line under the label, wrapped. */
+			description?: string;
 			onSelect: () => void;
 			danger?: boolean;
 			checked?: boolean;
@@ -23,12 +25,14 @@ type Props = {
 	onClose: () => void;
 	align?: "start" | "end";
 	minWidth?: number;
+	/** Cap the width, so long item descriptions wrap. */
+	maxWidth?: number;
 };
 
 /** A popover menu in a portal, positioned against its anchor and flipped to fit the viewport. */
-export function Menu({ anchor, items, onClose, align = "start", minWidth = 200 }: Props) {
+export function Menu({ anchor, items, onClose, align = "start", minWidth = 200, maxWidth }: Props) {
 	const ref = useRef<HTMLDivElement>(null);
-	const [style, setStyle] = useState<React.CSSProperties>({ visibility: "hidden", top: 0, left: 0 });
+	const [style, setStyle] = useState<React.CSSProperties>({ visibility: "hidden", top: 0, left: 0, maxWidth });
 
 	useLayoutEffect(() => {
 		const menu = ref.current;
@@ -37,7 +41,7 @@ export function Menu({ anchor, items, onClose, align = "start", minWidth = 200 }
 		const margin = 8;
 		const vw = window.innerWidth;
 		const vh = window.innerHeight;
-		const width = Math.min(Math.max(menu.offsetWidth, minWidth), vw - margin * 2);
+		const width = Math.min(Math.max(menu.offsetWidth, minWidth), maxWidth ?? Number.POSITIVE_INFINITY, vw - margin * 2);
 		const below = vh - rect.bottom - margin;
 		const above = rect.top - margin;
 		const height = menu.scrollHeight;
@@ -47,10 +51,10 @@ export function Menu({ anchor, items, onClose, align = "start", minWidth = 200 }
 		left = Math.min(Math.max(margin, left), vw - width - margin);
 		setStyle(
 			placeBelow
-				? { top: rect.bottom + 4, left, minWidth: width, maxHeight }
-				: { bottom: vh - rect.top + 4, left, minWidth: width, maxHeight },
+				? { top: rect.bottom + 4, left, minWidth: width, maxWidth: width, maxHeight }
+				: { bottom: vh - rect.top + 4, left, minWidth: width, maxWidth: width, maxHeight },
 		);
-	}, [anchor, align, minWidth]);
+	}, [anchor, align, minWidth, maxWidth]);
 
 	useEffect(() => {
 		const onPointer = (event: PointerEvent) => {
@@ -119,7 +123,16 @@ export function Menu({ anchor, items, onClose, align = "start", minWidth = 200 }
 						)}
 					>
 						{item.icon && <span className="flex size-4 shrink-0 items-center justify-center">{item.icon}</span>}
-						<span className="min-w-0 flex-1 truncate">{item.label}</span>
+						{item.description ? (
+							<span className="min-w-0 flex-1">
+								<span className="block truncate">{item.label}</span>
+								<span className="mt-0.5 block whitespace-normal text-muted text-xs leading-snug">
+									{item.description}
+								</span>
+							</span>
+						) : (
+							<span className="min-w-0 flex-1 truncate">{item.label}</span>
+						)}
 						{item.hint && <span className="shrink-0 text-faint text-xs">{item.hint}</span>}
 						{item.checked && <Check className="size-4 shrink-0 text-accent" />}
 					</button>

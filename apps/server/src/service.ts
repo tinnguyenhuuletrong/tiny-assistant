@@ -20,19 +20,32 @@ import {
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
-import type {
-	ConversationViewValue,
-	DeltaOp,
-	ModelInfo,
-	ProjectInfo,
-	SendMode,
-	ServerState,
-	SessionInfo,
-	ThinkingLevel,
-	ViewEntry,
+import {
+	AGENT_DOC,
+	type AgentLiveData,
+	type ConversationViewValue,
+	type DeltaOp,
+	type EngineInfo,
+	type ModelInfo,
+	type ProjectInfo,
+	type SendMode,
+	type ServerState,
+	type SessionInfo,
+	type ThinkingLevel,
+	type ViewEntry,
 } from "@tiny/core/protocol";
+import {
+	AgentDoc,
+	AgentNotice,
+	type AgentTaskDef,
+	agentDocOps,
+	createAgentExtension,
+	createAgentTask,
+	newAgentData,
+} from "./agent.ts";
 import type { Config } from "./config.ts";
 import { AppDb, type IndexedMessage, type ToolCallRecord } from "./db.ts";
+import { createEngines, type Engine, EngineRegistry, PI_ENGINE } from "./engines/index.ts";
 import { UserCodeLoader } from "./loader.ts";
 import { availableModels, createModelRegistry, parseModelKey, pickDefaultModel } from "./models.ts";
 import { createPromptExtension } from "./prompt.ts";
@@ -52,10 +65,15 @@ export const VERSION = "0.1.0";
 
 export type FeedListener = (message: { t: "ops"; ops: DeltaOp[] } | { t: "ended"; reason: string }) => void;
 
-/** One conversation watch shared by every client following the session, plus busy tracking. */
+/**
+ * One conversation watch shared by every client following the session, plus busy tracking. An engine session also
+ * watches its `tiny.agent` document, merged into the view as `docs["tiny.agent"]`.
+ */
 type Feed = {
 	readonly sessionId: number;
 	readonly watch: ConversationWatch;
+	agentWatch?: { stop(): Promise<unknown> };
+	agent?: AgentLiveData;
 	latest: ConversationView;
 	readonly listeners: Set<FeedListener>;
 	busy: boolean;
@@ -71,6 +89,17 @@ export class HttpError extends Error {
 	) {
 		super(message);
 	}
+}
+
+/**
+ * Wait until no pi-durable SQL transaction can be open. pi-durable (through Chord) holds `BEGIN IMMEDIATE` across the
+ * awaits of a commit, on this same thread, and the app tables are written with synchronous `bun:sqlite`: a write that
+ * lands in that window busy-waits for a lock only this thread can release, stalls for the busy timeout, and fails with
+ * SQLITE_BUSY. Those transactions span only microtasks, so after a macrotask boundary none is open. Call it before
+ * writing app tables after awaiting pi-durable.
+ */
+function outsideDurableCommit(): Promise<void> {
+	return new Promise((resolve) => setImmediate(resolve));
 }
 
 function titleFrom(text: string): string {
@@ -98,7 +127,9 @@ export class AssistantService {
 	readonly registry: Registry;
 	readonly workflows: WorkflowCatalog;
 	readonly loader: UserCodeLoader;
+	readonly engines: EngineRegistry;
 	readonly #workflowTask: WorkflowTaskDef;
+	readonly #agentTask: AgentTaskDef;
 	modelList: ModelInfo[] = [];
 	defaultModel: string | null = null;
 
@@ -127,6 +158,8 @@ export class AssistantService {
 			workflows: WorkflowCatalog;
 			loader: UserCodeLoader;
 			workflowTask: WorkflowTaskDef;
+			engines: EngineRegistry;
+			agentTask: AgentTaskDef;
 		},
 	) {
 		this.db = parts.db;
@@ -135,11 +168,19 @@ export class AssistantService {
 		this.registry = parts.registry;
 		this.workflows = parts.workflows;
 		this.loader = parts.loader;
+		this.engines = parts.engines;
 		this.#workflowTask = parts.workflowTask;
+		this.#agentTask = parts.agentTask;
 	}
 
-	/** `options.models` replaces the configured providers (tests pass pi-ai's faux provider). */
-	static async open(config: Config, options: { models?: MutableModels } = {}): Promise<AssistantService> {
+	/**
+	 * `options.models` replaces the configured providers (tests pass pi-ai's faux provider); `options.engines` replaces
+	 * the configured engines (tests pass scripted ones).
+	 */
+	static async open(
+		config: Config,
+		options: { models?: MutableModels; engines?: Engine[] } = {},
+	): Promise<AssistantService> {
 		mkdirSync(config.dataDir, { recursive: true });
 		const dbPath = join(config.dataDir, "assistant.sqlite");
 		const db = new AppDb(dbPath);
@@ -152,9 +193,16 @@ export class AssistantService {
 			waiting: (sessionId, runId, key, open) => service?.setWaiting(sessionId, `${runId}:${key}`, open),
 		});
 
+		const engines = new EngineRegistry(options.engines ?? createEngines(config));
+		const agentTask = createAgentTask(engines, (sessionId) => {
+			const session = db.session(sessionId);
+			return session && { engine: session.engine, model: session.model, thinking: session.thinking, cwd: session.cwd };
+		});
+
 		registry.install(CodingTools);
 		registry.install(createPromptExtension(config.assistantDir));
 		registry.install(createWorkflowExtension(workflowTask));
+		registry.install(createAgentExtension(agentTask));
 
 		const loader = new UserCodeLoader(config.assistantDir, registry, workflows, () => service?.notifyRegistryChanged());
 		await loader.loadAll();
@@ -183,7 +231,17 @@ export class AssistantService {
 			context,
 		);
 
-		service = new AssistantService(config, { db, harness, models, registry, workflows, loader, workflowTask });
+		service = new AssistantService(config, {
+			db,
+			harness,
+			models,
+			registry,
+			workflows,
+			loader,
+			workflowTask,
+			engines,
+			agentTask,
+		});
 		await service.refreshModels();
 		loader.watch();
 		harness.resume();
@@ -197,6 +255,7 @@ export class AssistantService {
 		this.loader.close();
 		for (const pending of this.#feeds.values()) {
 			const feed = await pending.catch(() => undefined);
+			await feed?.agentWatch?.stop();
 			await feed?.watch.stop();
 		}
 		await this.harness.close(context);
@@ -278,11 +337,36 @@ export class AssistantService {
 			projects: this.db.projects(),
 			sessions: this.sessions(),
 			models: this.modelList,
+			engines: this.engineList(),
 			workflows: this.workflows.list(),
 			tools: this.tools(),
-			defaults: { model: this.defaultModel, thinking: "medium" },
+			defaults: {
+				model: this.defaultModel,
+				thinking: "medium",
+				engine: this.defaultEngine(),
+				engineModels: this.db.engineModels(),
+			},
 			version: VERSION,
 		};
+	}
+
+	engineList(): EngineInfo[] {
+		return this.engines.list(this.modelList.length > 0);
+	}
+
+	/** The engine new chats start with: the last one picked, while it is still offered; else pi. */
+	defaultEngine(): string {
+		const remembered = this.db.defaultEngine();
+		return remembered && this.engines.has(remembered) ? remembered : PI_ENGINE;
+	}
+
+	/** The models a session on `engine` may use, as `provider/modelId`. */
+	#modelsFor(engine: string): string[] {
+		const info = this.engineList().find((candidate) => candidate.id === engine);
+		const providers = info?.modelProviders;
+		return this.modelList
+			.filter((model) => !providers || providers.includes(model.provider))
+			.map((model) => `${model.provider}/${model.id}`);
 	}
 
 	tools() {
@@ -344,9 +428,14 @@ export class AssistantService {
 		return conversation;
 	}
 
+	/**
+	 * Start a session. `engine` picks what runs its turns (default: the remembered one). A session a user starts
+	 * remembers its engine and model as the defaults for the next new chat; one a workflow starts does not.
+	 */
 	async createSession(input: {
 		projectId?: string | null;
 		title?: string;
+		engine?: string;
 		model?: string;
 		thinking?: ThinkingLevel;
 		text?: string;
@@ -354,29 +443,56 @@ export class AssistantService {
 	}): Promise<SessionInfo> {
 		const project = input.projectId ? this.db.project(input.projectId) : undefined;
 		if (input.projectId && !project) throw new HttpError(404, "No such project");
-		const model = input.model ?? this.defaultModel;
-		if (!model) throw new HttpError(503, "No model available. Is Claude Code installed and logged in?");
+		const engine = input.engine ?? (input.workflow ? PI_ENGINE : this.defaultEngine());
+		const info = this.engineList().find((candidate) => candidate.id === engine);
+		if (!info) throw new HttpError(400, `No engine "${engine}"`);
+		if (!info.available) throw new HttpError(503, `${info.name} is not available: ${info.reason ?? "unknown reason"}`);
+		const allowed = this.#modelsFor(engine);
+		if (input.model && !allowed.includes(input.model))
+			throw new HttpError(400, `${info.name} cannot run the model ${input.model}`);
+		const remembered = this.db.engineModels()[engine];
+		const model =
+			input.model ??
+			(remembered && allowed.includes(remembered) ? remembered : undefined) ??
+			(this.defaultModel && allowed.includes(this.defaultModel) ? this.defaultModel : undefined) ??
+			allowed[0] ??
+			null;
+		// pi needs a model; an external engine without one uses its own default.
+		if (!model && engine === PI_ENGINE)
+			throw new HttpError(503, "No model available. Is Claude Code installed and logged in?");
 		const thinking = input.thinking ?? "medium";
 		const conversation = await this.harness.createConversation(
 			{
 				ownership: { kind: "ownerless" },
-				agent: { model: parseModelKey(model), thinkingLevel: thinking, ...(project ? { cwd: project.path } : {}) },
+				agent: {
+					...(model ? { model: parseModelKey(model) } : {}),
+					thinkingLevel: thinking,
+					...(project ? { cwd: project.path } : {}),
+				},
 			},
 			context,
 		);
 		const now = Date.now();
 		const id = Number(conversation.id);
+		if (engine !== PI_ENGINE) {
+			await conversation.commit(async (tx) => {
+				Object.assign(await tx.doc(AgentDoc, conversation.id), newAgentData(engine));
+			}, context);
+		}
+		await outsideDurableCommit();
 		this.db.insertSession({
 			id,
 			projectId: project?.id ?? null,
 			title: input.title?.trim() || (input.text ? titleFrom(input.text) : "New chat"),
 			createdAt: now,
 			updatedAt: now,
+			engine,
 			model,
 			thinking,
 			cwd: project?.path ?? null,
 			workflow: input.workflow ?? null,
 		});
+		if (!input.workflow) this.db.rememberEngine(engine, model, { asDefault: true });
 		if (input.text?.trim()) await this.send(id, input.text, "followUp", crypto.randomUUID());
 		this.#sessionsChanged();
 		return this.session(id)!;
@@ -394,12 +510,15 @@ export class AssistantService {
 		},
 	): Promise<SessionInfo> {
 		const conversation = await this.#conversation(id);
+		const session = this.db.session(id)!;
 		const agent: Record<string, unknown> = {};
 		const row: Parameters<AppDb["updateSession"]>[1] = {};
 		if (change.title !== undefined) row.title = change.title.trim() || "Untitled";
 		if (change.archived !== undefined) row.archived = change.archived;
 		if (change.pinned !== undefined) row.pinned = change.pinned;
 		if (change.model !== undefined) {
+			if (session.engine !== PI_ENGINE && !this.#modelsFor(session.engine).includes(change.model))
+				throw new HttpError(400, `This session's engine cannot run the model ${change.model}`);
 			agent.model = parseModelKey(change.model);
 			row.model = change.model;
 		}
@@ -415,7 +534,9 @@ export class AssistantService {
 			agent.cwd = project?.path ?? null;
 		}
 		if (Object.keys(agent).length > 0) await conversation.configure(agent as never, context);
+		await outsideDurableCommit();
 		this.db.updateSession(id, row);
+		if (change.model !== undefined) this.db.rememberEngine(session.engine, change.model, { asDefault: false });
 		this.#sessionsChanged();
 		return this.session(id)!;
 	}
@@ -425,10 +546,13 @@ export class AssistantService {
 		if (!content) throw new HttpError(400, "Empty message");
 		const conversation = await this.#conversation(id);
 		await this.#feed(id); // follow it, so busy state and indexing track the run
-		await conversation.submit(
-			{ type: "input", content, requestId, ...(mode === "steer" ? { whenBusy: "steer" as const } : {}) },
-			context,
-		);
+		if (this.#engineOf(id) !== PI_ENGINE) await this.#sendToEngine(conversation, content, requestId);
+		else
+			await conversation.submit(
+				{ type: "input", content, requestId, ...(mode === "steer" ? { whenBusy: "steer" as const } : {}) },
+				context,
+			);
+		await outsideDurableCommit();
 		const session = this.db.session(id);
 		this.db.updateSession(id, {
 			updatedAt: Date.now(),
@@ -436,6 +560,26 @@ export class AssistantService {
 			...(session?.title === "New chat" ? { title: titleFrom(content) } : {}),
 		});
 		this.#sessionsChanged();
+	}
+
+	#engineOf(id: number): string {
+		return this.db.session(id)?.engine ?? PI_ENGINE;
+	}
+
+	/**
+	 * One engine turn per message, as a task owned by the conversation. A message sent while a turn runs queues behind
+	 * the last queued turn (engines take no steering yet). A resent request ID is ignored.
+	 */
+	async #sendToEngine(conversation: Conversation, prompt: string, requestId: string): Promise<void> {
+		await conversation.commit(async (tx) => {
+			const doc = await tx.doc(AgentDoc, conversation.id);
+			if (doc.requests.includes(requestId)) return;
+			doc.requests = [...doc.requests.slice(-49), requestId];
+			const after = doc.queue.at(-1) ?? doc.run?.taskId ?? null;
+			const taskId = await tx.createTask(this.#agentTask, { prompt, after }, { ownership: { kind: "conversation" } });
+			// Queued until its `start` phase takes it off, so a message sent right after this one waits for it.
+			doc.queue.push(Number(taskId));
+		}, context);
 	}
 
 	async abort(id: number): Promise<void> {
@@ -446,11 +590,35 @@ export class AssistantService {
 	async compact(id: number, instructions?: string): Promise<void> {
 		const conversation = await this.#conversation(id);
 		await this.#feed(id);
+		if (this.#engineOf(id) !== PI_ENGINE) {
+			// External engines compact their own context: ask them to, as a turn.
+			await this.#sendToEngine(
+				conversation,
+				`/compact${instructions?.trim() ? ` ${instructions.trim()}` : ""}`,
+				crypto.randomUUID(),
+			);
+			return;
+		}
 		await conversation.compact(instructions, context);
 	}
 
 	async reset(id: number): Promise<void> {
 		const conversation = await this.#conversation(id);
+		if (this.#engineOf(id) !== PI_ENGINE) {
+			// Forget the engine's session: the next message starts a fresh one. The transcript stays.
+			await conversation.commit(async (tx) => {
+				const doc = await tx.doc(AgentDoc, conversation.id);
+				if (doc.run || doc.queue.length > 0) throw new HttpError(409, "Stop the running turn first");
+				doc.resume = null;
+				doc.costSeen = 0;
+				doc.failure = null;
+				await tx.appendEntry(conversation.id, {
+					kind: AgentNotice.kind,
+					data: { level: "info", text: "Context reset: the next message starts a new engine session" },
+				});
+			}, context);
+			return;
+		}
 		await conversation.reset(undefined, context);
 	}
 
@@ -479,6 +647,8 @@ export class AssistantService {
 	}): Promise<{ sessionId: number; runId: number }> {
 		const def = this.workflows.get(input.name);
 		if (!def) throw new HttpError(404, `No workflow "${input.name}"`);
+		if (input.sessionId !== undefined && this.#engineOf(input.sessionId) !== PI_ENGINE)
+			throw new HttpError(400, "Workflows run in Tiny sessions; start one from a new chat instead");
 		let validated: JsonValue;
 		try {
 			validated = this.workflows.validate(input.name, input.input);
@@ -503,6 +673,7 @@ export class AssistantService {
 			return id;
 		}, context);
 		this.#trackWorkflow(sessionId, Number(taskId));
+		await outsideDurableCommit();
 		this.db.updateSession(sessionId, { updatedAt: Date.now(), preview: `Workflow ${def.name}` });
 		this.#sessionsChanged();
 		return { sessionId, runId: Number(taskId) };
@@ -641,11 +812,23 @@ export class AssistantService {
 	async #openFeed(id: number): Promise<Feed> {
 		const conversation = await this.harness.conversation(id as never, context);
 		if (!conversation) throw new HttpError(404, `No conversation ${id}`);
+		const engine = this.#engineOf(id);
+		let agentWatch = engine === PI_ENGINE ? undefined : await this.harness.watchDoc(AgentDoc, conversation.id, context);
+		if (engine !== PI_ENGINE && !agentWatch) {
+			// Created with the session; recreate it if it is missing, so the session still works.
+			await conversation.commit(async (tx) => {
+				const doc = await tx.doc(AgentDoc, conversation.id);
+				if (!doc.engine) doc.engine = engine;
+			}, context);
+			agentWatch = await this.harness.watchDoc(AgentDoc, conversation.id, context);
+		}
 		const watch = await conversation.watch(context, { min: 60, max: 160 });
+		const agent = agentWatch?.value as AgentLiveData | undefined;
 		const feed: Feed = {
 			sessionId: id,
 			watch,
-			latest: watch.value,
+			...(agentWatch ? { agentWatch, agent } : {}),
+			latest: withAgent(watch.value, agent),
 			listeners: new Set(),
 			busy: false,
 			runStartedAt: 0,
@@ -657,13 +840,24 @@ export class AssistantService {
 		this.#maybeRelease(feed);
 		watch.start(async (call) => {
 			if (call.kind !== "value") return;
-			feed.latest = call.value;
+			feed.latest = withAgent(call.value, feed.agent);
 			const ops = call.ops as unknown as DeltaOp[];
+			// A root replacement drops the merged agent document: put it back.
+			if (feed.agent && ops.some((op) => op[0] === "r")) ops.push(["s", ["docs", AGENT_DOC], feed.agent]);
+			for (const listener of feed.listeners) listener({ t: "ops", ops });
+			this.#observeBusy(feed);
+		});
+		agentWatch?.start(async (call) => {
+			if (call.kind !== "value" || call.retired) return;
+			feed.agent = call.value as AgentLiveData;
+			feed.latest = withAgent(feed.latest, feed.agent);
+			const ops = agentDocOps(call.ops as unknown as DeltaOp[]) as DeltaOp[];
 			for (const listener of feed.listeners) listener({ t: "ops", ops });
 			this.#observeBusy(feed);
 		});
 		void watch.closed.then((end) => {
 			clearTimeout(feed.idleTimer);
+			void feed.agentWatch?.stop();
 			this.#forget(feed);
 			for (const listener of feed.listeners) listener({ t: "ended", reason: end.kind });
 		});
@@ -672,7 +866,8 @@ export class AssistantService {
 
 	#observeBusy(feed: Feed): void {
 		const live = feed.latest.docs["pi.live"] as { run?: { inputs?: number[] } } | undefined;
-		const busy = live?.run !== undefined;
+		const agent = feed.agent;
+		const busy = live?.run !== undefined || (agent !== undefined && (agent.run !== null || agent.queue.length > 0));
 		if (busy && live?.run?.inputs?.length) feed.runInputs = live.run.inputs;
 		if (busy === feed.busy) return;
 		feed.busy = busy;
@@ -693,6 +888,7 @@ export class AssistantService {
 		feed.idleTimer = setTimeout(() => {
 			if (feed.listeners.size > 0 || feed.busy) return;
 			this.#forget(feed);
+			void feed.agentWatch?.stop();
 			void feed.watch.stop();
 		}, 60_000);
 	}
@@ -703,6 +899,11 @@ export class AssistantService {
 	 */
 	async #reattachBusySessions(): Promise<void> {
 		for (const session of this.db.sessions(() => false, { limit: 200 })) {
+			if (session.engine !== PI_ENGINE) {
+				const agent = await this.harness.snapshot(AgentDoc, session.id as never, context).catch(() => undefined);
+				if (agent?.run || agent?.queue.length) await this.#feed(session.id).catch(() => undefined);
+				continue;
+			}
 			const live = await this.harness.snapshot(LiveDoc, session.id as never, context).catch(() => undefined);
 			if (live?.run) await this.#feed(session.id).catch(() => undefined);
 		}
@@ -802,17 +1003,20 @@ export class AssistantService {
 				}
 			}
 			const upTo = entries[entries.length - 1]!.id;
+			await outsideDurableCommit();
+			if (this.#closing) return;
 			this.db.index(id, upTo, messages, toolCalls);
 
 			if (feed && totals.turns > 0) {
 				const live = feed.latest.docs["pi.live"] as { runFailure?: { reason: string } } | undefined;
+				const failure = live?.runFailure ?? feed.agent?.failure ?? undefined;
 				const endedAt = Date.now();
 				this.db.insertRun({
 					sessionId: id,
 					submissionId: feed.runInputs[0] ?? 0,
 					model,
-					status: live?.runFailure ? "unanswered" : "done",
-					reason: live?.runFailure?.reason ?? null,
+					status: failure ? "unanswered" : "done",
+					reason: failure?.reason ?? null,
 					startedAt: feed.runStartedAt || endedAt,
 					endedAt,
 					durationMs: feed.runStartedAt ? endedAt - feed.runStartedAt : 0,
@@ -833,4 +1037,10 @@ export class AssistantService {
 			console.warn(`[index] session ${id}: ${error}`);
 		}
 	}
+}
+
+/** The view with an engine session's agent document merged in. */
+function withAgent(view: ConversationView, agent: AgentLiveData | undefined): ConversationView {
+	if (!agent) return view;
+	return { ...view, docs: { ...view.docs, [AGENT_DOC]: agent as never } };
 }

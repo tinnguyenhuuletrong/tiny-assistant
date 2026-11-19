@@ -4,13 +4,15 @@ import { join } from "node:path";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { type FauxProviderHandle, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import type { Config } from "../src/config.ts";
+import type { Engine } from "../src/engines/types.ts";
 import { AssistantService } from "../src/service.ts";
 
 export type Fixture = {
 	root: string;
 	config: Config;
 	faux: FauxProviderHandle;
-	open(): Promise<AssistantService>;
+	/** `engines` replaces the configured engines (none by default, so tests never start a real CLI). */
+	open(options?: { engines?: Engine[] }): Promise<AssistantService>;
 	cleanup(): void;
 };
 
@@ -27,6 +29,8 @@ export function fixture(): Fixture {
 		webDir: undefined,
 		providers: [],
 		defaultModel: undefined,
+		engines: [],
+		claude: { command: "claude", permissionMode: "bypassPermissions", chrome: undefined, useApiKey: false },
 		fsRoots: [root],
 		token: undefined,
 		allowedLogins: [],
@@ -39,10 +43,10 @@ export function fixture(): Fixture {
 		root,
 		config,
 		faux,
-		async open() {
+		async open(options = {}) {
 			const models = createModels();
 			models.setProvider(faux.provider);
-			return AssistantService.open(config, { models });
+			return AssistantService.open(config, { models, engines: options.engines ?? [] });
 		},
 		cleanup() {
 			rmSync(root, { recursive: true, force: true });

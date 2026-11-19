@@ -1,4 +1,4 @@
-import type { ThinkingLevel } from "@tiny/core";
+import { modelsForEngine, pickEngineDefaults, type ThinkingLevel } from "@tiny/core";
 import { PanelLeft, Workflow } from "lucide-react";
 import { useState } from "react";
 import { client } from "../../lib/client.ts";
@@ -10,7 +10,7 @@ import { useUi } from "../../lib/ui.ts";
 import { IconButton } from "../ui/Button.tsx";
 import { parseRunArg } from "./ChatView.tsx";
 import { Composer, type SlashCommand } from "./Composer.tsx";
-import { ModelPicker, ProjectPicker, ThinkingPicker } from "./Pickers.tsx";
+import { EnginePicker, ModelPicker, ProjectPicker, ThinkingPicker } from "./Pickers.tsx";
 
 const COMMANDS: SlashCommand[] = [{ name: "run", description: "Run a workflow", argHint: "<workflow>" }];
 
@@ -29,14 +29,21 @@ export function NewChat({ initialProject }: { initialProject?: string | null }) 
 	const [chosenProject, setProject] = useState<string | null>(() =>
 		initialProject !== undefined ? initialProject : load<string | null>(KEYS.lastProject, null),
 	);
+	// Null until the user picks: then the daemon's remembered engine (the last one a chat started with) is preselected.
+	const [chosenEngine, setEngine] = useState<string | null>(null);
 	const [model, setModel] = useState<string | null>(null);
 	const [thinking, setThinking] = useState<ThinkingLevel | null>(null);
 	const [submitting, setSubmitting] = useState(false);
 
 	const projects = state?.projects ?? [];
 	const projectId = projects.some((project) => project.id === chosenProject) ? chosenProject : null;
-	const models = state?.models ?? [];
-	const modelValue = model ?? state?.defaults.model ?? null;
+	const engines = state?.engines ?? [];
+	const preset = state
+		? pickEngineDefaults(engines, state.models, state.defaults, chosenEngine)
+		: { engine: undefined, model: null };
+	const engine = preset.engine;
+	const models = modelsForEngine(engine, state?.models ?? []);
+	const modelValue = model && models.some((item) => `${item.provider}/${item.id}` === model) ? model : preset.model;
 	const currentModel = models.find((item) => `${item.provider}/${item.id}` === modelValue);
 	const thinkingValue = thinking ?? state?.defaults.thinking ?? "off";
 
@@ -46,7 +53,8 @@ export function NewChat({ initialProject }: { initialProject?: string | null }) 
 			client.createSession({
 				projectId,
 				text,
-				model: model ?? undefined,
+				...(engine ? { engine: engine.id } : {}),
+				model: modelValue ?? undefined,
 				thinking: thinking ?? undefined,
 			}),
 		);
@@ -82,7 +90,7 @@ export function NewChat({ initialProject }: { initialProject?: string | null }) 
 					placeholder="How can I help you today?"
 					onSubmit={submit}
 					submitting={submitting}
-					commands={COMMANDS}
+					commands={engine?.workflows === false ? [] : COMMANDS}
 					workflows={state?.workflows}
 					onCommand={(_, arg) => ui.openWorkflows({ ...parseRunArg(arg), projectId })}
 					autoFocus
@@ -94,6 +102,14 @@ export function NewChat({ initialProject }: { initialProject?: string | null }) 
 								onChange={setProject}
 								onAddProject={ui.openAddProject}
 							/>
+							<EnginePicker
+								value={engine?.id ?? null}
+								engines={engines}
+								onChange={(id) => {
+									setEngine(id);
+									setModel(null);
+								}}
+							/>
 							<ModelPicker value={modelValue} models={models} onChange={setModel} />
 							{(!currentModel || currentModel.reasoning) && (
 								<ThinkingPicker value={thinkingValue} onChange={setThinking} />
@@ -101,7 +117,12 @@ export function NewChat({ initialProject }: { initialProject?: string | null }) 
 						</>
 					}
 				/>
-				{(state?.workflows.length ?? 0) > 0 && (
+				{engine && engines.length > 1 && (
+					<p className="mx-auto mt-2 w-full max-w-3xl px-1 text-faint text-xs leading-snug">
+						<span className="text-muted">{engine.name}:</span> {engine.note}
+					</p>
+				)}
+				{(state?.workflows.length ?? 0) > 0 && engine?.workflows !== false && (
 					<div className="mx-auto mt-3 flex w-full max-w-3xl flex-wrap justify-center gap-2">
 						<button
 							type="button"

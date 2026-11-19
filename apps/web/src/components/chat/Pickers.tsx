@@ -1,5 +1,5 @@
-import type { ModelInfo, ProjectInfo, ThinkingLevel } from "@tiny/core";
-import { Brain, ChevronDown, Folder, FolderPlus } from "lucide-react";
+import type { EngineInfo, ModelInfo, ProjectInfo, ThinkingLevel } from "@tiny/core";
+import { Bot, Brain, ChevronDown, Folder, FolderPlus } from "lucide-react";
 import { cn, modelKey, modelName } from "../../lib/format.ts";
 import { Menu, type MenuItem, useMenuAnchor } from "../ui/Menu.tsx";
 
@@ -117,6 +117,48 @@ export function ProjectPicker({
 						})),
 						{ kind: "separator" },
 						{ label: "Add project…", icon: <FolderPlus className="size-4 text-muted" />, onSelect: onAddProject },
+					]}
+				/>
+			)}
+		</>
+	);
+}
+
+/** What runs the chat's turns: tiny's own loop, Claude Code, ... Each choice carries its note. */
+export function EnginePicker({
+	value,
+	engines,
+	onChange,
+}: {
+	value: string | null;
+	engines: readonly EngineInfo[];
+	onChange: (engineId: string) => void;
+}) {
+	const menu = useMenuAnchor();
+	const current = engines.find((engine) => engine.id === value);
+	if (engines.length < 2) return null;
+	return (
+		<>
+			<button type="button" onClick={menu.toggle} className={pill} title={current?.note}>
+				<Bot className="size-3.5 shrink-0" />
+				<span className="truncate">{current?.name ?? "Engine"}</span>
+				<ChevronDown className="size-3 shrink-0" />
+			</button>
+			{menu.anchor && (
+				<Menu
+					anchor={menu.anchor}
+					onClose={menu.close}
+					minWidth={300}
+					maxWidth={380}
+					items={[
+						{ kind: "header", label: "Run with" },
+						...engines.map((engine) => ({
+							label: engine.name,
+							description: engine.available ? engine.note : (engine.reason ?? "Not available"),
+							disabled: !engine.available,
+							checked: engine.id === value,
+							onSelect: () => onChange(engine.id),
+						})),
 					]}
 				/>
 			)}
