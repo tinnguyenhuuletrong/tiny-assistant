@@ -28,6 +28,8 @@ export type Config = {
 		chrome: boolean | undefined;
 		/** Let the CLI use `ANTHROPIC_API_KEY` (API billing) instead of your Claude login. */
 		useApiKey: boolean;
+		/** Export Claude Code's OpenTelemetry metrics, events, and traces (`TINY_CLAUDE_OTEL_ENDPOINT`); absent: off. */
+		otel: ClaudeTelemetry | undefined;
 	};
 	/** Folders the project picker may browse. */
 	fsRoots: string[];
@@ -41,6 +43,13 @@ export type Config = {
 	allowedOrigins: string[];
 	/** Accept connections from outside loopback and the tailnet (100.64.0.0/10, fd7a:115c:a1e0::/48). Off by default. */
 	allowAnyNetwork: boolean;
+};
+
+export type ClaudeTelemetry = {
+	/** OTLP/HTTP base URL (`/v1/metrics`, `/v1/logs`, `/v1/traces` are added), e.g. `http://127.0.0.1:7070`. */
+	endpoint: string;
+	/** Also export prompt and response text, tool arguments (Bash commands, file paths), and tool output. */
+	content: boolean;
 };
 
 const repoRoot = resolve(import.meta.dir, "../../..");
@@ -84,6 +93,13 @@ function chromeSetting(value: string | undefined): boolean | undefined {
 	}
 }
 
+function claudeTelemetry(endpoint: string | undefined, content: string | undefined): ClaudeTelemetry | undefined {
+	const url = endpoint?.trim();
+	if (!url) return undefined;
+	if (!/^https?:\/\/[^/]/.test(url)) throw new Error("TINY_CLAUDE_OTEL_ENDPOINT must be an http:// or https:// URL");
+	return { endpoint: url.replace(/\/+$/, ""), content: content === "1" };
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
 	const webDir = env.TINY_WEB_DIR ? expand(env.TINY_WEB_DIR) : join(repoRoot, "apps/web/dist");
 	return {
@@ -101,6 +117,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 			permissionMode: permissionMode(env.TINY_CLAUDE_PERMISSION_MODE),
 			chrome: chromeSetting(env.TINY_CLAUDE_CHROME),
 			useApiKey: env.TINY_CLAUDE_USE_API_KEY === "1",
+			otel: claudeTelemetry(env.TINY_CLAUDE_OTEL_ENDPOINT, env.TINY_CLAUDE_OTEL_CONTENT),
 		},
 		fsRoots: (list(env.TINY_FS_ROOTS).length > 0 ? list(env.TINY_FS_ROOTS) : ["~"]).map(expand),
 		token: env.TINY_TOKEN || undefined,

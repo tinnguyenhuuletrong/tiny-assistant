@@ -7,6 +7,7 @@
  * Unlike the `claude-code` model provider (pi-claude-code), which uses Claude Code only to reach the model, here Claude
  * Code runs the whole turn: its own tools, its own context management.
  */
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
@@ -20,6 +21,8 @@ import {
 import { isImage } from "@tiny/core/media";
 import type { ThinkingLevel } from "@tiny/core/protocol";
 import { INLINE_IMAGE_TYPES, promptWithAttachments } from "../attachments.ts";
+import type { ClaudeTelemetry } from "../config.ts";
+import { telemetryEnv } from "../telemetry.ts";
 import {
 	type AssistantMessageData,
 	type Engine,
@@ -42,6 +45,8 @@ export type ClaudeCodeEngineOptions = {
 	chrome: boolean | undefined;
 	/** Keep `ANTHROPIC_API_KEY` for the CLI (API billing). Off: it uses your Claude login, like pi-claude-code. */
 	useApiKey: boolean;
+	/** Where Claude Code sends its OpenTelemetry metrics, events, and traces; undefined: nowhere. */
+	otel?: ClaudeTelemetry | undefined;
 };
 
 /** Longest tool result text kept in the transcript; Claude Code already bounds what the model sees. */
@@ -66,7 +71,7 @@ export function createClaudeCodeEngine(options: ClaudeCodeEngineOptions): Engine
 	return {
 		id: "claude-code",
 		name: "Claude Code",
-		note: `Runs Claude Code itself in the project, set up like \`claude\` there: your skills, plugins, hooks, MCP servers, CLAUDE.md${options.chrome === false ? "" : ", and Claude in Chrome"}, with ${permissions}. Its turns are recorded in this session.`,
+		note: `Runs Claude Code itself in the project, set up like \`claude\` there: your skills, plugins, hooks, MCP servers, CLAUDE.md${options.chrome === false ? "" : ", and Claude in Chrome"}, with ${permissions}. Its turns are recorded in this session${options.otel ? `, and its OpenTelemetry metrics, events, and traces go to ${options.otel.endpoint}` : ""}.`,
 		modelProviders: ["claude-code"],
 		// Claude takes images and PDFs as content; anything else reaches it as a path its Read and Bash tools can open.
 		media: { inline: [...INLINE_IMAGE_TYPES, "application/pdf"] },
@@ -91,6 +96,17 @@ async function* runTurn(options: ClaudeCodeEngineOptions, input: TurnInput): Asy
 
 	const env: Record<string, string | undefined> = { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: "tiny-assistant" };
 	if (!options.useApiKey) delete env.ANTHROPIC_API_KEY;
+	if (options.otel) {
+		// Each turn is its own `claude` process whose counters start at zero and are often exported once, at exit: a
+		// fresh `service.instance.id` makes every turn its own series, so its last value is exactly that turn's usage.
+		const tags = {
+			"service.instance.id": randomUUID(),
+			"tiny.engine": "claude-code",
+			"tiny.session.id": String(input.sessionId),
+			"tiny.project": input.cwd,
+		};
+		Object.assign(env, telemetryEnv(options.otel, env, tags));
+	}
 	const extraArgs: Record<string, string | null> = {};
 	if (options.chrome === true) extraArgs.chrome = null;
 	if (options.chrome === false) extraArgs["no-chrome"] = null;

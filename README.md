@@ -33,6 +33,8 @@ sent from the phone appears in the terminal. ([MP4](docs/media/sync-demo.mp4))
   streamed to every client.
 - **One API.** REST + one WebSocket. The web app and the TUI use the same typed client (`@tiny/core`).
 - **Logs you can analyze.** Transcripts, per-run tokens, cost, duration, and tool calls live in one SQLite file.
+- **Observable.** One setting sends Claude Code's OpenTelemetry (metrics, events, traces) to your backend, tagged
+  with the tiny session that ran it.
 
 ## How it fits together
 
@@ -112,6 +114,44 @@ What differs from a Tiny chat:
 Settings (`.env`): `TINY_ENGINES` (default `claude-code`; empty for Tiny only), `TINY_CLAUDE_PERMISSION_MODE`
 (default `bypassPermissions`), `TINY_CLAUDE_CHROME` (`on`, `off`, `settings`), `TINY_CLAUDE_COMMAND`. The CLI uses your
 Claude login: `ANTHROPIC_API_KEY` is dropped unless `TINY_CLAUDE_USE_API_KEY=1`.
+
+### Monitoring Claude Code (OpenTelemetry)
+
+Set `TINY_CLAUDE_OTEL_ENDPOINT` to an OTLP/HTTP endpoint and Claude Code exports its own
+[telemetry](https://code.claude.com/docs/en/monitoring-usage) there, from both ways tiny runs it: Claude Code chats
+(the Agent SDK) and Tiny chats on a `claude-code/...` model (the `claude -p` calls of pi-claude-code). Metrics (tokens,
+cost, active time, lines of code), events (prompts, API requests and errors, tool decisions and results, hooks, MCP
+connections), and traces (model requests and tool calls, with their durations).
+
+```sh
+TINY_CLAUDE_OTEL_ENDPOINT=http://127.0.0.1:7070   # e.g. tiny-eye, an OpenTelemetry Collector, Grafana Alloy, ...
+# TINY_CLAUDE_OTEL_CONTENT=1                       # also export prompt and response text, tool arguments
+                                                   # (Bash commands, file paths), and tool output
+```
+
+tiny sets the `OTEL_*` variables: OTLP over HTTP (protobuf), metrics as cumulative counters (what Prometheus-style
+backends store; Claude Code defaults to delta), every signal exported each second (the
+[Agent SDK advice](https://code.claude.com/docs/en/agent-sdk/observability) for short-lived processes). Any `OTEL_*`
+or `CLAUDE_CODE_*` variable you set in `.env` yourself wins; `OTEL_RESOURCE_ATTRIBUTES` is extended. Resource tags:
+
+| Path              | Tags                                                                                                 |
+| ----------------- | ---------------------------------------------------------------------------------------------------- |
+| Claude Code chats | `tiny.engine=claude-code`, `tiny.session.id`, `tiny.project`, a fresh `service.instance.id` per turn |
+| Tiny chats        | `tiny.engine=pi` (set in the daemon's environment at start, so tools' programs inherit `OTEL_*` too) |
+
+Every turn (Claude Code) or model call (Tiny) is its own `claude` process whose counters start at zero, and a short
+one exports once, at exit: the last value of each process's series (`service.instance.id`, or Claude Code's
+`session.id` for Tiny chats) is what it used, so sum `max_over_time` per process rather than `rate`. Without
+`TINY_CLAUDE_OTEL_CONTENT=1`, prompts and tool details stay out, as in Claude Code. Claude Code still adds your
+account's identity attributes (user id, email, organization), so send it only somewhere you trust.
+
+Limits seen with Claude Code 2.1.330: Claude Code chats don't export the `claude_code.interaction` root span, so each
+model request and tool call is its own trace (`TRACEPARENT` is not applied either); and pi-claude-code may stop a
+worker before it flushes, so Tiny chats' numbers can be incomplete.
+
+[tiny-eye's machine example](https://github.com/tinnguyenhuuletrong/tiny-eye/tree/main/examples/machine) has a
+Claude Code dashboard for this: cost and tokens per engine and tiny session, tool calls by tool, model latency, the
+slowest steps as traces, and the events.
 
 **Adding an engine** (Codex, Antigravity, ...): implement `Engine` from
 [`apps/server/src/engines/types.ts`](apps/server/src/engines/types.ts) and list it in `createEngines`
