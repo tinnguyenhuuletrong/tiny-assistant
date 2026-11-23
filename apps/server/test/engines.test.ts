@@ -10,6 +10,7 @@ import {
 	summarizeLive,
 } from "@tiny/core";
 import { AgentDoc } from "../src/agent.ts";
+import { loadConfig } from "../src/config.ts";
 import { ClaudeTranslator } from "../src/engines/claude-code.ts";
 import {
 	type AssistantMessageData,
@@ -20,6 +21,7 @@ import {
 } from "../src/engines/types.ts";
 import { startServer } from "../src/server.ts";
 import type { AssistantService } from "../src/service.ts";
+import { enableDaemonTelemetry, telemetryEnv } from "../src/telemetry.ts";
 import { type Fixture, fixture, until } from "./helpers.ts";
 
 let fx: Fixture;
@@ -494,5 +496,69 @@ describe("Claude Code translation", () => {
 		expect(events.map((event) => event.type)).toEqual(["session", "done"]);
 		const done = events.at(-1);
 		expect(done?.type === "done" && done.error).toBe("Not logged in · Please run /login");
+	});
+});
+
+describe("Claude Code telemetry", () => {
+	test("TINY_CLAUDE_OTEL_ENDPOINT turns it on; content is opt-in", () => {
+		expect(loadConfig({}).claude.otel).toBeUndefined();
+		expect(loadConfig({ TINY_CLAUDE_OTEL_ENDPOINT: "http://127.0.0.1:7070/" }).claude.otel).toEqual({
+			endpoint: "http://127.0.0.1:7070",
+			content: false,
+		});
+		const config = loadConfig({ TINY_CLAUDE_OTEL_ENDPOINT: "https://otel.example", TINY_CLAUDE_OTEL_CONTENT: "1" });
+		expect(config.claude.otel?.content).toBe(true);
+		expect(() => loadConfig({ TINY_CLAUDE_OTEL_ENDPOINT: "127.0.0.1:7070" })).toThrow("TINY_CLAUDE_OTEL_ENDPOINT");
+	});
+
+	test("exports metrics, events, and traces as cumulative OTLP, tagged with the tiny session", () => {
+		const env = telemetryEnv(
+			{ endpoint: "http://127.0.0.1:7070", content: false },
+			{},
+			{ "tiny.session.id": "7", "tiny.project": "/work/a,b=c" },
+		);
+		expect(env).toEqual({
+			CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+			CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1",
+			OTEL_METRICS_EXPORTER: "otlp",
+			OTEL_LOGS_EXPORTER: "otlp",
+			OTEL_TRACES_EXPORTER: "otlp",
+			OTEL_EXPORTER_OTLP_ENDPOINT: "http://127.0.0.1:7070",
+			OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
+			OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: "cumulative",
+			OTEL_METRIC_EXPORT_INTERVAL: "1000",
+			OTEL_LOGS_EXPORT_INTERVAL: "1000",
+			OTEL_TRACES_EXPORT_INTERVAL: "1000",
+			OTEL_RESOURCE_ATTRIBUTES: "tiny.session.id=7,tiny.project=%2Fwork%2Fa%2Cb%3Dc",
+		});
+		expect(env.OTEL_LOG_USER_PROMPTS).toBeUndefined();
+	});
+
+	test("content opt-in, and the daemon's own OTEL_* settings win", () => {
+		const env = telemetryEnv(
+			{ endpoint: "http://127.0.0.1:7070", content: true },
+			{ OTEL_TRACES_EXPORTER: "none", OTEL_RESOURCE_ATTRIBUTES: "enduser.id=me" },
+			{ "tiny.session.id": "7", "tiny.project": undefined },
+		);
+		expect(env.OTEL_TRACES_EXPORTER).toBeUndefined();
+		expect(env.OTEL_RESOURCE_ATTRIBUTES).toBe("enduser.id=me,tiny.session.id=7");
+		expect(env.OTEL_LOG_USER_PROMPTS).toBe("1");
+		expect(env.OTEL_LOG_TOOL_DETAILS).toBe("1");
+		expect(env.OTEL_LOG_TOOL_CONTENT).toBe("1");
+	});
+
+	test("the daemon's own environment covers Tiny chats' claude-code provider; a turn's tags replace its own", () => {
+		const daemon: Record<string, string | undefined> = { OTEL_RESOURCE_ATTRIBUTES: "enduser.id=me" };
+		enableDaemonTelemetry(undefined, daemon);
+		expect(daemon.CLAUDE_CODE_ENABLE_TELEMETRY).toBeUndefined();
+		enableDaemonTelemetry({ endpoint: "http://127.0.0.1:7070", content: false }, daemon);
+		expect(daemon.CLAUDE_CODE_ENABLE_TELEMETRY).toBe("1");
+		expect(daemon.OTEL_RESOURCE_ATTRIBUTES).toBe("enduser.id=me,tiny.engine=pi");
+		const turn = telemetryEnv({ endpoint: "http://127.0.0.1:7070", content: false }, daemon, {
+			"tiny.engine": "claude-code",
+			"tiny.session.id": "7",
+		});
+		expect(turn.OTEL_RESOURCE_ATTRIBUTES).toBe("enduser.id=me,tiny.engine=claude-code,tiny.session.id=7");
+		expect(turn.CLAUDE_CODE_ENABLE_TELEMETRY).toBeUndefined();
 	});
 });

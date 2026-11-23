@@ -241,6 +241,7 @@ export function createAgentTask(
 			for await (const event of engine.run({
 				prompt: task.input.prompt,
 				attachments,
+				sessionId,
 				cwd: session.cwd ?? undefined,
 				model,
 				thinking: session.thinking,

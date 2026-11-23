@@ -59,6 +59,8 @@ export type TurnInput = {
 	 * lists every file's path, so tools can open the rest) and add the `inline` ones as content blocks.
 	 */
 	attachments: PreparedAttachment[];
+	/** tiny's session id, for engines that tag what they report (telemetry) with it. */
+	sessionId: number;
 	/** The session's project folder; absent for a plain chat. */
 	cwd: string | undefined;
 	/** The model id without its provider (`claude-opus-5-5`), or null for the engine's own default. */

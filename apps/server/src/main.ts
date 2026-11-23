@@ -6,8 +6,10 @@
 import { loadConfig } from "./config.ts";
 import { startServer } from "./server.ts";
 import { AssistantService } from "./service.ts";
+import { enableDaemonTelemetry } from "./telemetry.ts";
 
 const config = loadConfig();
+if (config.providers.includes("claude-code")) enableDaemonTelemetry(config.claude.otel, process.env);
 const service = await AssistantService.open(config);
 const server = startServer(service);
 
